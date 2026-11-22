@@ -48,10 +48,20 @@ const json = (data, status = 200, extra = {}) => new Response(JSON.stringify(dat
 const offline = (status = 503) => json({error: MSG}, status, {'X-Balitu-Nuvem': 'offline'});
 const PLACEHOLDER = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 480 680"><rect width="480" height="680" fill="#1b2140"/><text x="240" y="350" fill="#6f7aa8" font-family="sans-serif" font-size="28" text-anchor="middle">Balitu</text></svg>';
 function offlinePage(path) {
-  return new Response(`<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Servidor desligado · Balitu Database</title><style>body{margin:0;min-height:100vh;display:grid;place-items:center;background:linear-gradient(145deg,#0c1125,#191238);color:#fff;font:16px system-ui,sans-serif;text-align:center;padding:20px}.b{max-width:420px;background:#ffffff0f;border:1px solid #ffffff1f;border-radius:22px;padding:32px 24px}h1{font-size:23px;margin:10px 0}p{color:#c5c1dc}a{display:inline-block;margin-top:14px;color:#fff;background:linear-gradient(135deg,#ff4b62,#9c4dff);padding:11px 22px;border-radius:99px;text-decoration:none;font-weight:700}</style></head><body><div class="b"><div style="font-size:46px">😴</div><h1>${MSG}</h1><p>Esta parte do Balitu Database precisa do PC ligado.</p><a href="${BASE || ''}/">Voltar ao início</a></div></body></html>`, {status: 503, headers: {'Content-Type': 'text/html; charset=utf-8'}});
+  return new Response(`<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Servidor desligado · Balitu Database</title><style>body{margin:0;min-height:100vh;display:grid;place-items:center;background:linear-gradient(145deg,#0c1125,#191238);color:#fff;font:16px system-ui,sans-serif;text-align:center;padding:20px}.b{max-width:420px;background:#ffffff0f;border:1px solid #ffffff1f;border-radius:22px;padding:32px 24px}h1{font-size:23px;margin:10px 0}p{color:#c5c1dc}a{display:inline-block;margin-top:14px;color:#fff;background:linear-gradient(135deg,#ff4b62,#9c4dff);padding:11px 22px;border-radius:99px;text-decoration:none;font-weight:700}</style></head><body><div class="b"><div style="font-size:46px">😴</div><h1>${MSG}</h1><p>Esta parte do Balitu Database precisa do PC ligado.</p><p id="pc" style="font-size:13px">Conferindo se o servidor já voltou…</p><a href="${BASE || ''}/">Voltar ao início</a></div><script src="/offline.js"></script><script>window.BalituNuvem&&BalituNuvem.pcOnline().then(function(b){if(!b)document.getElementById('pc').textContent='O servidor ainda não respondeu.'})</script></body></html>`, {status: 503, headers: {'Content-Type': 'text/html; charset=utf-8'}});
 }
 
 // ---------- Arquivos guardados no Drive ----------
+const driveSizes = new Map();
+async function driveSize(id, token) {
+  if (driveSizes.has(id)) return driveSizes.get(id);
+  try {
+    const r = await fetch(DRIVE + id + '?fields=size&supportsAllDrives=true', {headers: {Authorization: 'Bearer ' + token}});
+    const n = r.ok ? Number((await r.json()).size) : 0;
+    if (n > 0) { driveSizes.set(id, n); return n; }
+  } catch {}
+  return 0;
+}
 async function driveFile(id, request, type) {
   const s = await loadState();
   if (!s || !s.token || Date.now() > s.tokenExp) return json({error: 'Sessão expirada'}, 401, {'X-Balitu-Nuvem': 'token'});
@@ -59,11 +69,24 @@ async function driveFile(id, request, type) {
   const range = request.headers.get('Range');
   if (range) headers.Range = range;
   else if (!/audio/.test(type || '')) { const hit = await (await caches.open('balitu-arquivos')).match(id); if (hit) return hit; }
-  const r = await fetch(DRIVE + id + '?alt=media', {headers});
+  const r = await fetch(DRIVE + id + '?alt=media&supportsAllDrives=true', {headers});
   if (r.status === 401) return json({error: 'Sessão expirada'}, 401, {'X-Balitu-Nuvem': 'token'});
   if (!r.ok && r.status !== 206) return null;
   const h = new Headers({'Content-Type': type || r.headers.get('Content-Type') || 'application/octet-stream', 'Accept-Ranges': 'bytes'});
   for (const k of ['Content-Length', 'Content-Range']) if (r.headers.get(k)) h.set(k, r.headers.get(k));
+  // O player de áudio só aceita uma resposta parcial (206) com Content-Range. Quando o Drive
+  // não deixa o navegador ler esse cabeçalho, ele é refeito a partir do pedido e do tamanho do arquivo.
+  if (r.status === 206 && !h.has('Content-Range')) {
+    const m = /bytes=(\d+)-(\d*)/.exec(range || ''), len = Number(r.headers.get('Content-Length') || 0);
+    if (m) {
+      const start = Number(m[1]), total = m[2] === '' && len ? start + len : await driveSize(id, s.token);
+      if (total) {
+        const end = len ? start + len - 1 : (m[2] !== '' ? Math.min(Number(m[2]), total - 1) : total - 1);
+        h.set('Content-Range', `bytes ${start}-${end}/${total}`);
+        if (!len) h.set('Content-Length', String(end - start + 1));
+      }
+    }
+  }
   const resp = new Response(r.body, {status: r.status, headers: h});
   if (!range && !/audio/.test(type || '') && r.status === 200) { const copy = resp.clone(); caches.open('balitu-arquivos').then(c => c.put(id, copy)).catch(() => {}); }
   return resp;
@@ -164,7 +187,7 @@ function downloadAudio(id) {
     if (!s?.token || Date.now() > s.tokenExp) return;
     const cache = await caches.open(AUDIO_CACHE);
     if (await cache.match(audioKey(id))) return;
-    const r = await fetch(DRIVE + id + '?alt=media', {headers: {Authorization: 'Bearer ' + s.token}});
+    const r = await fetch(DRIVE + id + '?alt=media&supportsAllDrives=true', {headers: {Authorization: 'Bearer ' + s.token}});
     if (!r.ok) return;
     await cache.put(audioKey(id), new Response(r.body, {headers: {'Content-Type': 'audio/mpeg', 'X-Saved': String(Date.now())}}));
     const keys = await cache.keys();
@@ -294,6 +317,20 @@ async function adminLive(s, path, request) {
   } catch (e) { return json({error: 'Não consegui salvar na nuvem agora. Tente de novo.'}, 503); }
 }
 
+// Capas (BalituFlix e audiolivros): o endereço traz versão e largura (?v=...&w=...), que mudam
+// com o tempo. Se a combinação exata não está na cópia, serve a mesma capa em outra versão.
+const COVER_PATH = /^\/(balituflix\/covers\/|balito-leitor\/api\/cover\/)/;
+let coverIndex = null, coverIndexOf = null;
+function coverEntry(s, path) {
+  if (!COVER_PATH.test(path)) return null;
+  if (coverIndexOf !== s.entries) {
+    coverIndex = new Map(); coverIndexOf = s.entries;
+    for (const k of Object.keys(s.entries)) { const p = k.split('?')[0]; if (COVER_PATH.test(p) && !coverIndex.has(p)) coverIndex.set(p, k); }
+  }
+  const k = coverIndex.get(path);
+  return k ? s.entries[k] : null;
+}
+
 async function handle(request) {
   const url = new URL(request.url);
   if (url.origin !== location.origin) return fetch(request);
@@ -301,7 +338,7 @@ async function handle(request) {
   if (PROPRIOS.has(path)) return fetch(request);
   const s = await loadState();
   const isNav = request.mode === 'navigate';
-  if (!s) return isNav ? Response.redirect('/entrar?volta=' + encodeURIComponent(path + url.search), 302) : offline(401);
+  if (!s) return isNav ? Response.redirect('/entrar?volta=' + encodeURIComponent(path + url.search), 302) : json({error: 'Entre de novo para continuar.'}, 401, {'X-Balitu-Nuvem': 'entrar'});
 
   // Endereços que o site monta como "/api" + "/x" ficam com o prefixo da nuvem repetido no meio.
   if (BASE && path.includes(BASE)) path = path.split(BASE).join('');
@@ -329,6 +366,7 @@ async function handle(request) {
   const key = path + url.search;
   let e = s.entries[key] || s.entries[path] || (path.endsWith('/') ? s.entries[path + 'index.html'] : null);
   if (!e && !url.search && !path.endsWith('/')) e = s.entries[path + '/'];
+  if (!e) e = coverEntry(s, path);
   if (e) {
     if (e.x != null) return new Response(rewrite(e.x, e.t), {headers: {'Content-Type': e.t + (/charset/.test(e.t) ? '' : '; charset=utf-8')}});
     const id = s.blobs[e.b];
