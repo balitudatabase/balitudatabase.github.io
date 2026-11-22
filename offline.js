@@ -6,6 +6,53 @@
   var MSG = 'O servidor não está ativo no momento! :( Volte mais tarde';
   var CLIENT_ID = '330955968953-hkm76a032m98apcoidf3jc00m7qm15r7.apps.googleusercontent.com';
   var lastClick = 0, lastShown = 0;
+  var fetch0 = window.fetch;
+
+  // ---------- O PC voltou? ----------
+  // O modo nuvem é só uma cópia para quando o PC está desligado. Se o servidor responde,
+  // a pessoa é levada para o site completo (mesmo caminho), em vez de ver "servidor não está ativo".
+  var PC_FIXO = 'https://jucabalitu-pc.tailcec770.ts.net';
+  var DESTINO = 'https://alaorfrangullysjunior01-dot.github.io/googlefotos/destino.txt';
+  var pcCheck = null, pcCheckAt = 0, indoParaPc = false;
+  function sonda(base) {
+    return new Promise(function (ok, no) {
+      var i = new Image(), t = setTimeout(function () { i.onload = i.onerror = null; i.src = ''; no(); }, 6000);
+      i.onload = function () { clearTimeout(t); ok(base); };
+      i.onerror = function () { clearTimeout(t); no(); };
+      i.src = base + '/logo-backup.svg?' + Date.now();
+    });
+  }
+  // Devolve o endereço do PC se ele estiver no ar, ou null. Guarda a resposta por 20 s.
+  function pcOnline() {
+    if (pcCheck && Date.now() - pcCheckAt < 20000) return pcCheck;
+    pcCheckAt = Date.now();
+    pcCheck = new Promise(function (ok) {
+      var abertas = 0, feito = false, listaFechada = false;
+      function fim(valor) { if (!feito && (valor || (listaFechada && abertas === 0))) { feito = true; ok(valor || null); } }
+      function tentar(base) { abertas++; sonda(base).then(function (b) { abertas--; fim(b); }, function () { abertas--; fim(null); }); }
+      tentar(PC_FIXO);
+      // O endereço público atual também fica publicado em destino.txt (caso o fixo mude um dia).
+      var espera = new Promise(function (r) { setTimeout(r, 4000); });
+      Promise.race([fetch0(DESTINO + '?' + Date.now(), {cache: 'no-store'}).then(function (r) { return r.ok ? r.text() : ''; }), espera])
+        .then(function (t) { var u = String(t || '').trim().replace(/\/+$/, ''); if (/^https:\/\/[a-z0-9.-]+(:\d+)?$/i.test(u) && u !== PC_FIXO) tentar(u); })
+        .catch(function () {})
+        .then(function () { listaFechada = true; fim(null); });
+    });
+    return pcCheck;
+  }
+  function irParaPc(base, caminho) {
+    if (indoParaPc) return; indoParaPc = true;
+    ready(function () {
+      var n = document.createElement('div');
+      n.setAttribute('style', 'position:fixed;left:50%;bottom:18px;transform:translateX(-50%);z-index:2147483647;background:#0b0f22f2;color:#9ff0d4;border:1px solid #2ad1a155;border-radius:99px;padding:9px 16px;font:600 13px system-ui,sans-serif');
+      n.textContent = 'Servidor no ar — abrindo o site completo…';
+      document.body.appendChild(n);
+    });
+    location.replace(base + (caminho || (location.pathname + location.search + location.hash)));
+  }
+  window.BalituNuvem = {pcOnline: pcOnline, irParaPc: irParaPc};
+  // Ao abrir qualquer página da nuvem: se o PC já voltou, vai para ele.
+  if (!/^\/entrar(\.html)?$/.test(location.pathname)) pcOnline().then(function (b) { if (b) irParaPc(b); });
   addEventListener('pointerdown', function () { lastClick = Date.now(); renovar(false); }, true);
 
   // Renova sozinho o acesso ao Google Drive (vale 1 hora) no próximo toque na tela,
@@ -58,8 +105,13 @@
   function avisar() {
     if (Date.now() - lastShown < 4000) return; lastShown = Date.now();
     document.querySelectorAll('video,audio').forEach(function (m) { try { m.pause(); } catch (e) {} });
-    modal(MSG, 'Tocar, baixar e abrir arquivos precisa do PC ligado. O resto do Balitu Database continua aqui.', 'Entendi');
+    // Antes de dizer que o servidor está fora, confere: se ele responde, abre o site completo.
+    pcOnline().then(function (b) {
+      if (b) return irParaPc(b);
+      modal(MSG, 'Tocar, baixar e abrir arquivos precisa do PC ligado. O resto do Balitu Database continua aqui.', 'Entendi');
+    });
   }
+  function entrarDeNovo() { location.href = '/entrar?volta=' + encodeURIComponent(location.pathname + location.search); }
   function sessao() {
     modal('Sua sessão na nuvem expirou', 'Toque para continuar de onde parou.', 'Continuar', function () {
       renovar(true, function () { location.reload(); });
@@ -69,9 +121,10 @@
   function checar(res, method, url) {
     var tipo = res && res.headers && res.headers.get('X-Balitu-Nuvem');
     if (tipo === 'token') return sessao();
+    if (tipo === 'entrar') return entrarDeNovo();
     if (tipo === 'offline' && (method !== 'GET' || Date.now() - lastClick < 2500 || /media|play|stream|download|file|audio|video/i.test(url))) avisar();
   }
-  var f0 = window.fetch;
+  var f0 = fetch0;
   window.fetch = function (input, init) {
     var method = ((init && init.method) || (input && input.method) || 'GET').toUpperCase(), url = String(input && input.url || input);
     return f0.apply(this, arguments).then(function (r) { checar(r, method, url); return r; });
@@ -82,5 +135,9 @@
     return open0.apply(this, arguments);
   };
   // Vídeo ou música que não carregam = precisam do PC.
-  addEventListener('error', function (e) { var t = e.target; if (t && /^(VIDEO|AUDIO|SOURCE)$/.test(t.tagName)) avisar(); }, true);
+  // (Se o acesso ao Google Drive venceu, o problema é a sessão, não o servidor.)
+  addEventListener('error', function (e) {
+    var t = e.target; if (!t || !/^(VIDEO|AUDIO|SOURCE)$/.test(t.tagName)) return;
+    if (Number(localStorage.getItem('bal-nuvem-exp') || 0) < Date.now()) sessao(); else avisar();
+  }, true);
 })();
