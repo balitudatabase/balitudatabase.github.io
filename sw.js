@@ -1,0 +1,352 @@
+// Balitu Database · modo nuvem
+// Faz o papel do servidor quando o PC está desligado: entrega a "foto" do site
+// guardada no Google Drive (privado) e toca os audiolivros direto do Drive.
+'use strict';
+const BASE = ''; // o site da nuvem fica na raiz de balitudatabase.github.io (mesmos caminhos do site do PC)
+const MSG = 'O servidor não está ativo no momento! :( Volte mais tarde';
+const DRIVE = 'https://www.googleapis.com/drive/v3/files/';
+const STATE_URL = '/__balitu_estado__';
+// Arquivos do próprio site da nuvem (servidos pelo GitHub, nunca pelo service worker).
+const PROPRIOS = new Set(['/sw.js', '/offline.js', '/entrar', '/entrar.html', '/404.html', '/favicon.ico', '/robots.txt']);
+let state = null; // {token, tokenExp, user, entries, blobs, books, fb}
+const FB_KEY = 'AIzaSyAOB_pyCITzJGAX_ScV4-QE2tb5YAP_rxo';
+const FS = 'https://firestore.googleapis.com/v1/projects/balitu-database/databases/(default)/documents';
+
+self.addEventListener('install', () => self.skipWaiting());
+self.addEventListener('activate', e => e.waitUntil(self.clients.claim()));
+self.addEventListener('message', e => {
+  if (e.data?.type === 'estado') {
+    state = e.data.state;
+    e.waitUntil(caches.open('balitu-nuvem').then(c => c.put(STATE_URL, new Response(JSON.stringify(state)))).then(() => e.source?.postMessage({type: 'ok'})));
+  }
+  if (e.data?.type === 'token' && state) { state.token = e.data.token; state.tokenExp = e.data.tokenExp; if (e.data.fb) state.fb = e.data.fb; saveState(); }
+  if (e.data?.type === 'sair') { state = null; caches.delete('balitu-nuvem'); caches.delete('balitu-arquivos'); caches.delete(AUDIO_CACHE); }
+});
+function saveState() { return caches.open('balitu-nuvem').then(c => c.put(STATE_URL, new Response(JSON.stringify(state)))).catch(() => {}); }
+async function loadState() {
+  if (state) return state;
+  const r = await (await caches.open('balitu-nuvem')).match(STATE_URL);
+  state = r ? await r.json() : null;
+  return state;
+}
+
+// ---------- Reescrita: endereços "/x" do site passam a ficar dentro de /googlefotos/nuvem/app ----------
+const ROOT_IN_QUOTES = /(["'`])\/(?=[A-Za-z0-9_.~%?#-])(?!googlefotos\/)/g;
+const ROOT_IN_CSS = /(url\(\s*["']?)\/(?=[A-Za-z0-9_.~%?#-])(?!googlefotos\/)/g;
+function rewrite(text, type) {
+  if (BASE && /css/.test(type)) return text.replace(ROOT_IN_CSS, '$1' + BASE + '/');
+  if (BASE && /html|javascript|json/.test(type)) text = text.replace(ROOT_IN_QUOTES, '$1' + BASE + '/');
+  if (/html/.test(type)) {
+    const inject = '<script src="/offline.js"></script>';
+    text = /<head[^>]*>/i.test(text) ? text.replace(/<head[^>]*>/i, m => m + inject) : inject + text;
+  }
+  return text;
+}
+
+// ---------- Respostas prontas ----------
+const json = (data, status = 200, extra = {}) => new Response(JSON.stringify(data), {status, headers: {'Content-Type': 'application/json; charset=utf-8', ...extra}});
+const offline = (status = 503) => json({error: MSG}, status, {'X-Balitu-Nuvem': 'offline'});
+const PLACEHOLDER = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 480 680"><rect width="480" height="680" fill="#1b2140"/><text x="240" y="350" fill="#6f7aa8" font-family="sans-serif" font-size="28" text-anchor="middle">Balitu</text></svg>';
+function offlinePage(path) {
+  return new Response(`<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Servidor desligado · Balitu Database</title><style>body{margin:0;min-height:100vh;display:grid;place-items:center;background:linear-gradient(145deg,#0c1125,#191238);color:#fff;font:16px system-ui,sans-serif;text-align:center;padding:20px}.b{max-width:420px;background:#ffffff0f;border:1px solid #ffffff1f;border-radius:22px;padding:32px 24px}h1{font-size:23px;margin:10px 0}p{color:#c5c1dc}a{display:inline-block;margin-top:14px;color:#fff;background:linear-gradient(135deg,#ff4b62,#9c4dff);padding:11px 22px;border-radius:99px;text-decoration:none;font-weight:700}</style></head><body><div class="b"><div style="font-size:46px">😴</div><h1>${MSG}</h1><p>Esta parte do Balitu Database precisa do PC ligado.</p><a href="${BASE || ''}/">Voltar ao início</a></div></body></html>`, {status: 503, headers: {'Content-Type': 'text/html; charset=utf-8'}});
+}
+
+// ---------- Arquivos guardados no Drive ----------
+async function driveFile(id, request, type) {
+  const s = await loadState();
+  if (!s || !s.token || Date.now() > s.tokenExp) return json({error: 'Sessão expirada'}, 401, {'X-Balitu-Nuvem': 'token'});
+  const headers = {Authorization: 'Bearer ' + s.token};
+  const range = request.headers.get('Range');
+  if (range) headers.Range = range;
+  else if (!/audio/.test(type || '')) { const hit = await (await caches.open('balitu-arquivos')).match(id); if (hit) return hit; }
+  const r = await fetch(DRIVE + id + '?alt=media', {headers});
+  if (r.status === 401) return json({error: 'Sessão expirada'}, 401, {'X-Balitu-Nuvem': 'token'});
+  if (!r.ok && r.status !== 206) return null;
+  const h = new Headers({'Content-Type': type || r.headers.get('Content-Type') || 'application/octet-stream', 'Accept-Ranges': 'bytes'});
+  for (const k of ['Content-Length', 'Content-Range']) if (r.headers.get(k)) h.set(k, r.headers.get(k));
+  const resp = new Response(r.body, {status: r.status, headers: h});
+  if (!range && !/audio/.test(type || '') && r.status === 200) { const copy = resp.clone(); caches.open('balitu-arquivos').then(c => c.put(id, copy)).catch(() => {}); }
+  return resp;
+}
+
+// ---------- Audiolivros (catálogo vindo do PC) ----------
+function readerBook(s, id) {
+  const lib = s.entries['/balito-leitor/api/library'];
+  if (lib?.x) { try { const it = JSON.parse(lib.x).items.find(b => b.id === id); if (it) return it; } catch {} }
+  const b = s.books?.find(x => x.id === id);
+  if (!b) return null;
+  return {id: b.id, title: b.title, author: b.author, synopsis: b.synopsis || '', series: b.series || '', coverUrl: '/balito-leitor/api/cover/' + b.id, shared: true, status: 'ready', readyPercent: Math.round(100 * b.parts.length / b.totalParts), preparing: b.parts.length < b.totalParts, message: 'Audiolivro · modo nuvem', parts: b.parts.map(p => ({index: p.index, status: 'ready', duration: p.duration, played: []}))};
+}
+
+// ---------- Dados ao vivo (Firebase Firestore) ----------
+async function fbToken() {
+  const s = await loadState();
+  if (!s?.fb?.refreshToken) return null;
+  if (s.fb.idToken && Date.now() < s.fb.exp) return s.fb.idToken;
+  const r = await fetch('https://securetoken.googleapis.com/v1/token?key=' + FB_KEY, {method: 'POST', headers: {'Content-Type': 'application/x-www-form-urlencoded'}, body: 'grant_type=refresh_token&refresh_token=' + encodeURIComponent(s.fb.refreshToken)});
+  if (!r.ok) return null;
+  const j = await r.json();
+  s.fb.idToken = j.id_token; s.fb.refreshToken = j.refresh_token || s.fb.refreshToken; s.fb.exp = Date.now() + (Number(j.expires_in || 3600) - 120) * 1000;
+  saveState();
+  return s.fb.idToken;
+}
+async function fsCall(method, path, body) {
+  const t = await fbToken();
+  if (!t) throw new Error('sem sessão');
+  const r = await fetch(FS + path, {method, headers: {Authorization: 'Bearer ' + t, 'Content-Type': 'application/json'}, body: body ? JSON.stringify(body) : undefined});
+  if (r.status === 404) return null;
+  if (!r.ok) throw new Error('Firestore ' + r.status);
+  return r.json();
+}
+const docJson = d => { try { return JSON.parse(d?.fields?.json?.stringValue || 'null'); } catch { return null; } };
+async function fsList(col) {
+  const out = []; let page = '';
+  do { const j = await fsCall('GET', '/' + col + '?pageSize=300' + (page ? '&pageToken=' + page : '')); for (const d of j?.documents || []) out.push({id: decodeURIComponent(d.name.split('/').pop()), data: docJson(d), at: Number(d.fields?.atualizado?.integerValue || 0)}); page = j?.nextPageToken || ''; } while (page);
+  return out;
+}
+const fsPut = (path, data) => fsCall('PATCH', path, {fields: {json: {stringValue: JSON.stringify(data)}, atualizado: {integerValue: String(Date.now())}}});
+
+let liveBooks = null, liveBooksAt = 0, liveProgress = null, liveProgressAt = 0;
+async function booksLive() {
+  if (liveBooks && Date.now() - liveBooksAt < 60000) return liveBooks;
+  liveBooks = new Map((await fsList('audiolivros')).filter(d => d.data?.id).map(d => [d.id, d.data])); liveBooksAt = Date.now();
+  return liveBooks;
+}
+const progCol = s => '/progresso/' + encodeURIComponent(s.fb.user) + '/livros';
+async function progressLive(s) {
+  if (liveProgress && Date.now() - liveProgressAt < 15000) return liveProgress;
+  liveProgress = new Map((await fsList(progCol(s).slice(1)).catch(() => [])).map(d => [d.id, d.data || {}])); liveProgressAt = Date.now();
+  return liveProgress;
+}
+const hex = async text => [...new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text)))].map(b => b.toString(16).padStart(2, '0')).join('');
+// Mesmo formato do Reader no PC (balito-leitor/web/shared.mjs).
+async function liveItem(s, b, prog = {}) {
+  const n = b.parts.length; let ready = 0;
+  for (const p of b.parts) { if (p.status === 'ready' && p.file) ready++; else break; }
+  const preparing = ready < n;
+  const item = {nextPart: preparing ? {part: ready + 1, state: 'calculating'} : null, id: b.id, title: b.title, author: b.author, synopsis: b.synopsis || '', series: b.series || '',
+    coverUrl: BASE + '/balito-leitor/api/cover/' + b.id, ambient: b.ambient === true, created: b.created, provisional: b.provisional === true, reviewCount: b.reviewCount || 0, reviewNotice: b.reviewNotice || '',
+    shared: true, status: 'ready', readyPercent: Math.round(100 * ready / n), preparing,
+    message: preparing ? ready + ' de ' + n + ' partes disponíveis · em produção' : 'Audiolivro completo · biblioteca de todos',
+    position: prog.position,
+    parts: b.parts.map((p, i) => ({index: i, status: i < ready ? 'ready' : 'pending', duration: i < ready ? p.duration : 0, reviewCount: p.reviewCount || 0, endPercent: 100 * (i + 1) / n, played: prog.played?.[i] || []}))};
+  const second = b.secondVolumeStartsAt;
+  if (Number.isInteger(second) && second >= 2 && second <= n) {
+    const positions = [prog.position, ...Object.values(prog.volumePositions || {})];
+    item.volumes = [[0, second - 2], [second - 1, n - 1]].map(([firstIndex, lastIndex], i) => ({number: i + 1, firstIndex, lastIndex,
+      position: positions.find(p => p && Number.isInteger(p.part) && p.part >= firstIndex && p.part <= lastIndex && item.parts[p.part].status === 'ready' && Number.isFinite(p.time) && p.time >= 0)}));
+    item.bookmarkKey = (await hex((await hex(s.fb.user)) + '/' + b.id)).slice(0, 32);
+  }
+  return item;
+}
+function mergeRanges(list, max) {
+  const r = list.filter(x => Array.isArray(x) && x.length === 2 && Number.isFinite(x[0]) && Number.isFinite(x[1])).map(([a, b]) => [Math.max(0, a), Math.min(max, b)]).filter(([a, b]) => b > a).sort((a, b) => a[0] - b[0]), out = [];
+  for (const x of r) { const l = out[out.length - 1]; if (l && x[0] <= l[1] + 0.25) l[1] = Math.max(l[1], x[1]); else out.push(x); }
+  return out;
+}
+// ---------- Áudio guardado no aparelho (continua tocando mesmo depois que o acesso ao Drive vence) ----------
+const AUDIO_CACHE = 'balitu-audio', AUDIO_KEEP = 4, downloading = new Map();
+const audioKey = id => '/__balitu_audio__/' + id;
+async function cachedAudio(id, request) {
+  const hit = await (await caches.open(AUDIO_CACHE)).match(audioKey(id));
+  if (!hit) return null;
+  const blob = await hit.blob(), size = blob.size, m = /bytes=(\d*)-(\d*)/.exec(request.headers.get('Range') || '');
+  if (!m) return new Response(blob, {headers: {'Content-Type': 'audio/mpeg', 'Content-Length': String(size), 'Accept-Ranges': 'bytes'}});
+  let start = m[1] === '' ? size - Number(m[2]) : Number(m[1]), end = m[1] !== '' && m[2] !== '' ? Number(m[2]) : size - 1;
+  start = Math.max(0, start); end = Math.min(size - 1, end);
+  if (start > end) return new Response(null, {status: 416, headers: {'Content-Range': 'bytes */' + size}});
+  return new Response(blob.slice(start, end + 1), {status: 206, headers: {'Content-Type': 'audio/mpeg', 'Content-Length': String(end - start + 1), 'Content-Range': `bytes ${start}-${end}/${size}`, 'Accept-Ranges': 'bytes'}});
+}
+function downloadAudio(id) {
+  if (downloading.has(id)) return downloading.get(id);
+  const job = (async () => {
+    const s = await loadState();
+    if (!s?.token || Date.now() > s.tokenExp) return;
+    const cache = await caches.open(AUDIO_CACHE);
+    if (await cache.match(audioKey(id))) return;
+    const r = await fetch(DRIVE + id + '?alt=media', {headers: {Authorization: 'Bearer ' + s.token}});
+    if (!r.ok) return;
+    await cache.put(audioKey(id), new Response(r.body, {headers: {'Content-Type': 'audio/mpeg', 'X-Saved': String(Date.now())}}));
+    const keys = await cache.keys();
+    if (keys.length > AUDIO_KEEP) {
+      const dated = await Promise.all(keys.map(async k => [k, Number((await cache.match(k)).headers.get('X-Saved') || 0)]));
+      dated.sort((a, b) => a[1] - b[1]);
+      for (const [k] of dated.slice(0, keys.length - AUDIO_KEEP)) await cache.delete(k);
+    }
+  })().catch(() => {}).finally(() => downloading.delete(id));
+  downloading.set(id, job);
+  return job;
+}
+async function playAudio(book, index, request) {
+  const part = book.parts[index];
+  if (!part?.file) return null;
+  const local = await cachedAudio(part.file, request);
+  // Baixa esta parte e a próxima em segundo plano enquanto o acesso ao Drive é válido.
+  if (!local) downloadAudio(part.file);
+  const next = book.parts[index + 1]; if (next?.file) downloading.get(part.file)?.then(() => downloadAudio(next.file)) || downloadAudio(next.file);
+  return local || (await driveFile(part.file, request, 'audio/mpeg'));
+}
+
+async function readerLive(s, path, url, request) {
+  if (!s.fb?.user) return null;
+  try {
+    if (path === '/balito-leitor/api/library' && request.method === 'GET') {
+      const [books, prog] = await Promise.all([booksLive(), progressLive(s)]);
+      if (!books.size) return null; // catálogo ainda não chegou: usa a cópia do PC
+      const shared = await Promise.all([...books.values()].map(b => liveItem(s, b, prog.get(b.id) || {})));
+      shared.sort((a, b) => b.created - a.created);
+      // Leituras pessoais (texto em áudio) continuam vindo do PC.
+      let mine = []; const rec = s.entries['/balito-leitor/api/library'];
+      if (rec?.x) try { mine = JSON.parse(rec.x).items.filter(i => !i.shared); } catch {}
+      return json({items: [...shared, ...mine]});
+    }
+    const book = /^\/balito-leitor\/api\/book\/([a-f0-9-]{36})$/.exec(path);
+    if (book && request.method === 'GET') {
+      const b = (await booksLive()).get(book[1]); if (!b) return null;
+      return json(await liveItem(s, b, (await progressLive(s)).get(b.id) || {}));
+    }
+    const prog = /^\/balito-leitor\/api\/progress\/([a-f0-9-]{36})$/.exec(path);
+    if (prog && request.method === 'POST') {
+      const b = (await booksLive()).get(prog[1]); if (!b) return null;
+      const input = await request.clone().json().catch(() => ({}));
+      const all = await progressLive(s), cur = all.get(b.id) || {}, i = input.part;
+      const item0 = await liveItem(s, b, cur);
+      if (!Number.isInteger(i) || item0.parts[i]?.status !== 'ready' || !Array.isArray(input.played) || input.played.length > 2000) return json({error: 'Progresso inválido.'}, 400);
+      const played = item0.parts.map(p => p.played);
+      played[i] = mergeRanges([...played[i], ...input.played], item0.parts[i].duration);
+      const saved = {played, position: cur.position, volumePositions: cur.volumePositions || {}, updatedAt: Date.now()};
+      if (Number.isFinite(input.position)) {
+        saved.position = {part: i, time: Math.max(0, Math.min(input.position, item0.parts[i].duration)), updatedAt: Date.now()};
+        const v = item0.volumes?.find(v => i >= v.firstIndex && i <= v.lastIndex); if (v) saved.volumePositions[v.number] = saved.position;
+      }
+      all.set(b.id, saved);
+      fsPut(progCol(s) + '/' + b.id, saved).catch(() => {});
+      return json(await liveItem(s, b, saved));
+    }
+    const cover = /^\/balito-leitor\/api\/cover\/([a-f0-9-]{36})$/.exec(path);
+    if (cover) {
+      const b = (await booksLive()).get(cover[1]);
+      if (b?.cover) { const r = await driveFile(b.cover, request, 'image/jpeg'); if (r && r.status < 300) return r; }
+      return null;
+    }
+    const audio = /^\/balito-leitor\/api\/audio\/([a-f0-9-]{36})$/.exec(path);
+    if (audio) {
+      const b = (await booksLive()).get(audio[1]);
+      if (!b) return null;
+      return (await playAudio(b, Number(url.searchParams.get('part') || 0), request)) || offline();
+    }
+  } catch (e) { return null; }
+  return null;
+}
+
+// ---------- Painel de gestão (usuários e permissões) ao vivo ----------
+const AREAS = ['photos', 'files', 'streaming', 'balituflix', 'games'];
+function applyChange(L, c) {
+  const user = String(c.user || '').trim(), find = u => L.users.find(x => x.user === u);
+  const setGoogle = (u, v) => { if (typeof v !== 'string') return; const e = v.trim().toLowerCase(); for (const x of L.users) x.google = x.user === u ? (e ? [e] : []) : (x.google || []).filter(g => g !== e); };
+  if (c.type === 'save') { const t = find(user); if (t) { t.permissions = c.permissions; if (typeof c.google === 'string') setGoogle(user, c.google); } }
+  else if (c.type === 'create') { L.users.push({user, permissions: c.permissions, fixed: false, google: c.google ? [c.google.trim().toLowerCase()] : [], created: c.at}); }
+  else if (c.type === 'delete') L.users = L.users.filter(x => x.user !== user);
+  else if (c.type === 'approve') { const p = L.pending.find(x => x.user === user); if (p) { L.pending = L.pending.filter(x => x.user !== user); L.users.push({user: c.newUser || user, permissions: c.permissions, fixed: false, google: p.email ? [p.email] : [], created: c.at}); } }
+  else if (c.type === 'reject') L.pending = L.pending.filter(x => x.user !== user);
+  else if (c.type === 'dismiss-reset') L.resets = (L.resets || []).filter(x => x.user !== user);
+  else if (c.type === 'master-email-remove') L.masterEmails = (L.masterEmails || []).filter(e => e !== String(c.email || '').toLowerCase());
+}
+async function adminListing(s) {
+  const docs = await fsList('usuarios');
+  const painelDoc = docs.find(d => d.id === '_painel'), painel = painelDoc?.data || {areas: AREAS, master: 'jucabalitu', masterEmails: [], resets: []};
+  const L = {areas: painel.areas || AREAS, master: painel.master, masterEmails: painel.masterEmails || [], resets: painel.resets || [], nuvem: true,
+    users: docs.filter(d => d.data && !d.data.pending && !d.id.startsWith('_') && d.data.user !== painel.master).map(d => ({user: d.data.user, permissions: d.data.permissions || [], fixed: !!d.data.fixed, google: d.data.emails || [], created: d.data.created || null})),
+    pending: docs.filter(d => d.data?.pending).map(d => { const {pending, ...item} = d.data; return item; })};
+  // Mudanças feitas aqui que o PC ainda não aplicou.
+  s.adminPending = (s.adminPending || []).filter(c => c.at > (painelDoc?.at || 0));
+  for (const c of s.adminPending) applyChange(L, c);
+  return L;
+}
+async function adminLive(s, path, request) {
+  if (!path.startsWith('/api/master/users') && path !== '/api/master/permissions') return null;
+  if (!s.fb?.user) return null;
+  if (s.fb.role !== 'master') return json({error: 'Somente o administrador pode abrir o painel de gestão.'}, 403);
+  try {
+    if (request.method === 'GET') {
+      const L = await adminListing(s);
+      return json(path === '/api/master/permissions' ? {users: L.users.map(u => ({user: u.user, permissions: u.permissions}))} : L);
+    }
+    if (request.method !== 'POST') return json({error: 'Método não permitido.'}, 405);
+    const data = await request.clone().json().catch(() => ({}));
+    const action = path === '/api/master/permissions' ? 'save' : path.split('/').pop();
+    if (typeof data.password === 'string' && data.password) return json({error: 'Trocar ou criar senha precisa do PC ligado. As outras mudanças funcionam na nuvem.'}, 400);
+    const user = String(data.user || '').trim(), permissions = (Array.isArray(data.permissions) ? data.permissions : []).filter(a => AREAS.includes(a));
+    if (!['save', 'create', 'delete', 'approve', 'reject', 'dismiss-reset', 'master-email-remove'].includes(action)) return json({error: 'Ação desconhecida.'}, 404);
+    if (action === 'create') {
+      if (!/^[A-Za-z0-9._-]{3,30}$/.test(user)) return json({error: 'Usuário de 3 a 30 letras ou números, sem espaços.'}, 400);
+      if (!data.google) return json({error: 'Informe o e-mail Google da pessoa.'}, 400);
+    }
+    if (typeof data.google === 'string' && data.google.trim() && !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(data.google.trim())) return json({error: 'E-mail Google inválido.'}, 400);
+    const change = {type: action, user, permissions, at: Date.now()};
+    if (typeof data.google === 'string') change.google = data.google;
+    if (data.newUser) change.newUser = String(data.newUser).trim();
+    if (data.email) change.email = String(data.email);
+    await fsCall('POST', '/alteracoes', {fields: {json: {stringValue: JSON.stringify(change)}}});
+    s.adminPending = [...(s.adminPending || []), change]; saveState();
+    const L = await adminListing(s);
+    return json(path === '/api/master/permissions' ? {ok: true, user, permissions, passwordChanged: false} : L);
+  } catch (e) { return json({error: 'Não consegui salvar na nuvem agora. Tente de novo.'}, 503); }
+}
+
+async function handle(request) {
+  const url = new URL(request.url);
+  if (url.origin !== location.origin) return fetch(request);
+  let path = url.pathname;
+  if (PROPRIOS.has(path)) return fetch(request);
+  const s = await loadState();
+  const isNav = request.mode === 'navigate';
+  if (!s) return isNav ? Response.redirect('/entrar?volta=' + encodeURIComponent(path + url.search), 302) : offline(401);
+
+  // Endereços que o site monta como "/api" + "/x" ficam com o prefixo da nuvem repetido no meio.
+  if (BASE && path.includes(BASE)) path = path.split(BASE).join('');
+  // Chamadas internas que só fazem sentido no PC: respondem em silêncio (sem aviso na tela).
+  if (path === '/api/database-activity') return new Response(null, {status: 204});
+  if (path === '/balito-leitor/api/drama/jobs' && request.method === 'GET') return json({items: []});
+  if (path === '/balito-leitor/api/voices' && request.method === 'GET' && !s.entries[path]) return json({voices: []});
+  // Painel de gestão ao vivo (Firebase).
+  { const live = await adminLive(s, path, request); if (live) return live; }
+  // Reader ao vivo: biblioteca, capas, progresso e áudio vêm do Firebase + Drive.
+  if (path.startsWith('/balito-leitor/api/')) { const live = await readerLive(s, path, url, request); if (live) return live; }
+  // Audiolivros: tocam direto do Drive.
+  const audio = /^\/balito-leitor\/api\/audio\/([a-f0-9-]{36})$/.exec(path);
+  if (audio) {
+    const b = s.books?.find(x => x.id === audio[1]), part = b?.parts.find(p => p.index === Number(url.searchParams.get('part') || 0));
+    if (part) return (await driveFile(part.file, request, 'audio/mpeg')) || offline();
+    return offline();
+  }
+  if (request.method !== 'GET' && request.method !== 'HEAD') {
+    // Progresso do Reader: aceita e devolve o livro (fica salvo no aparelho pelo próprio player).
+    const prog = /^\/balito-leitor\/api\/progress\/([a-f0-9-]{36})$/.exec(path);
+    if (prog) { const b = readerBook(s, prog[1]); if (b) return json(b); }
+    return offline();
+  }
+  const key = path + url.search;
+  let e = s.entries[key] || s.entries[path] || (path.endsWith('/') ? s.entries[path + 'index.html'] : null);
+  if (!e && !url.search && !path.endsWith('/')) e = s.entries[path + '/'];
+  if (e) {
+    if (e.x != null) return new Response(rewrite(e.x, e.t), {headers: {'Content-Type': e.t + (/charset/.test(e.t) ? '' : '; charset=utf-8')}});
+    const id = s.blobs[e.b];
+    if (id) {
+      const r = await driveFile(id, request, e.t);
+      if (r && r.status < 300 && /text|javascript|json|svg/.test(e.t)) return new Response(rewrite(await r.text(), e.t), {headers: {'Content-Type': e.t}});
+      if (r) return r;
+    }
+  }
+  const book = /^\/balito-leitor\/api\/book\/([a-f0-9-]{36})$/.exec(path);
+  if (book) { const b = readerBook(s, book[1]); return b ? json(b) : offline(404); }
+  if (/^\/balito-leitor\/api\/cover\//.test(path) || request.destination === 'image' || /\.(png|jpe?g|webp|gif|svg)$/i.test(path)) return new Response(PLACEHOLDER, {headers: {'Content-Type': 'image/svg+xml'}});
+  if (isNav || request.destination === 'document') return offlinePage(path);
+  return offline();
+}
+self.addEventListener('fetch', e => {
+  const p = handle(e.request).catch(() => offline());
+  e.respondWith(p);
+  // Mantém vivo o download do audiolivro para o aparelho.
+  e.waitUntil(p.then(() => Promise.all([...downloading.values()])).catch(() => {}));
+});
