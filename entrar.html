@@ -99,6 +99,13 @@ async function entrar(){
  }catch(e){msg(e.message||'Não foi possível entrar.');btn.disabled=false;btn.innerHTML=btnHtml}
 }
 document.getElementById('go').onclick=entrar;
+// Se o PC está ligado, o site completo é melhor que a cópia da nuvem: vai direto para ele.
+(function(){
+ var FIXO='https://jucabalitu-pc.tailcec770.ts.net',DESTINO='https://alaorfrangullysjunior01-dot.github.io/googlefotos/destino.txt',indo=false;
+ function sonda(base){var i=new Image(),t=setTimeout(function(){i.onload=null;i.src=''},6000);i.onload=function(){clearTimeout(t);if(indo)return;indo=true;msg('');document.querySelector('.sub').textContent='Servidor no ar — abrindo o site completo…';location.replace(base+volta)};i.src=base+'/logo-backup.svg?'+Date.now()}
+ sonda(FIXO);
+ fetch(DESTINO+'?'+Date.now(),{cache:'no-store'}).then(function(r){return r.ok?r.text():''}).then(function(t){var u=String(t).trim().replace(/\/+$/,'');if(/^https:\/\/[a-z0-9.-]+(:\d+)?$/i.test(u)&&u!==FIXO)sonda(u)}).catch(function(){});
+})();
 if(!('serviceWorker' in navigator)){msg('Este navegador não é compatível. Use o Chrome, Edge ou Safari atualizados.');document.getElementById('go').disabled=true}
 </script>
 </body>
