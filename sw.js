@@ -319,6 +319,115 @@ async function adminLive(s, path, request) {
 
 // Capas (BalituFlix e audiolivros): o endereço traz versão e largura (?v=...&w=...), que mudam
 // com o tempo. Se a combinação exata não está na cópia, serve a mesma capa em outra versão.
+// ---------- Jogos ao vivo: catálogo, capas e ROMs vêm do Google Drive ----------
+let nuvemCfg = null, nuvemCfgAt = 0, gamesCat = null, gamesCatId = '';
+async function nuvemConfig() {
+  if (nuvemCfg && Date.now() - nuvemCfgAt < 300000) return nuvemCfg;
+  try { nuvemCfg = docJson(await fsCall('GET', '/audiolivros/_nuvem')) || {}; nuvemCfgAt = Date.now(); } catch { nuvemCfg = nuvemCfg || {}; }
+  return nuvemCfg;
+}
+async function driveJson(id) {
+  const c = await caches.open('balitu-arquivos'), key = '/__drive_json__/' + id;
+  const hit = await c.match(key);
+  if (hit) return hit.json();
+  const s = await loadState();
+  if (!s?.token || Date.now() > s.tokenExp) throw new Error('sessão');
+  const r = await fetch(DRIVE + id + '?alt=media&supportsAllDrives=true', {headers: {Authorization: 'Bearer ' + s.token}});
+  if (!r.ok) throw new Error('drive ' + r.status);
+  const txt = await r.text();
+  c.put(key, new Response(txt, {headers: {'Content-Type': 'application/json'}})).catch(() => {});
+  return JSON.parse(txt);
+}
+async function gamesLive() {
+  const cfg = await nuvemConfig();
+  if (!cfg.jogos) return null;
+  if (gamesCat && gamesCatId === cfg.jogos) return gamesCat;
+  const list = await driveJson(cfg.jogos);
+  for (const g of list) g.s = (g.n + ' ' + g.c).toLocaleLowerCase('pt-BR');
+  gamesCat = {list, byId: new Map(list.map(g => [g.i, g]))}; gamesCatId = cfg.jogos;
+  return gamesCat;
+}
+// Saves dos jogos na nuvem ficam guardados no próprio aparelho.
+async function gameSave(path, url, request) {
+  const c = await caches.open('balitu-jogos-saves'), key = '/__save__/' + encodeURIComponent(url.searchParams.get('id') || '');
+  if (path === '/api/games/state-info') { const h = await c.match(key); return json(h ? {exists: true, updatedAt: Number(h.headers.get('X-At')) || 0} : {exists: false}); }
+  if (request.method === 'POST') { await c.put(key, new Response(await request.arrayBuffer(), {headers: {'Content-Type': 'application/octet-stream', 'X-At': String(Date.now())}})); return json({ok: true}); }
+  const h = await c.match(key);
+  return h ? new Response(await h.arrayBuffer(), {headers: {'Content-Type': 'application/octet-stream'}}) : json({error: 'Sem jogo salvo'}, 404);
+}
+const gameSort = new Intl.Collator('pt-BR', {numeric: true, sensitivity: 'base'});
+async function gamesApi(s, path, url, request) {
+  if (!path.startsWith('/api/games') || path.startsWith('/api/games/trap')) return null;
+  if (path === '/api/games/state' || path === '/api/games/state-info') return gameSave(path, url, request);
+  const cat = await gamesLive().catch(() => null);
+  if (!cat) return null; // catálogo ainda não está na nuvem: usa a cópia das páginas
+  const pub = g => ({id: g.i, name: g.n, format: g.f, console: g.c, core: g.k, cover: ''});
+  const lc = t => String(t || '').trim().toLocaleLowerCase('pt-BR');
+  const P = url.searchParams;
+  if (path === '/api/games/consoles') {
+    const m = new Map(); for (const g of cat.list) m.set(g.c, (m.get(g.c) || 0) + 1);
+    return json({consoles: [...m].map(([name, count]) => ({name, count})).sort((a, b) => gameSort.compare(a.name, b.name))});
+  }
+  if (path === '/api/games') {
+    const q = lc(P.get('q')), want = lc(P.get('console')), off = Math.max(0, Number(P.get('offset') || 0));
+    const all = cat.list.filter(g => (!want || lc(g.c) === want) && (!q || g.s.includes(q)));
+    return json({games: all.slice(off, off + 120).map(pub), total: all.length, partial: off + 120 < all.length});
+  }
+  if (path === '/api/games/boxart' || path === '/api/games/cover') {
+    const g = cat.byId.get(P.get('id') || '');
+    if (g?.a) { const r = await driveFile(g.a, request, 'image/png'); if (r && r.ok) return r; }
+    return json({error: 'Sem capa'}, 404);
+  }
+  if (path === '/api/games/collage') {
+    const want = lc(P.get('console')), list = cat.list.filter(g => lc(g.c) === want && g.a), picks = [];
+    for (let i = 0; i < Math.min(5, list.length); i++) { const g = list[Math.floor(i * list.length / Math.min(5, list.length))]; picks.push({id: g.i, cover: ''}); }
+    return json({games: picks});
+  }
+  if (path === '/api/games/info') return json({});
+  if (path === '/api/games/art-status') return json({running: false, done: cat.list.length, total: cat.list.length});
+  if (path === '/api/games/file') {
+    const g = cat.byId.get(P.get('id') || '');
+    if (!g) return json({error: 'Jogo não encontrado'}, 404);
+    return (await driveFile(g.r, request, 'application/zip')) || offline();
+  }
+  return null;
+}
+
+// ---------- BalituFlix ao vivo: catálogo e vídeos vêm do Drive da Ulbra ----------
+let flixCat = null, flixCatId = '';
+async function flixLive() {
+  const cfg = await nuvemConfig();
+  if (!cfg.filmes) return null;
+  if (flixCat && flixCatId === cfg.filmes) return flixCat;
+  const data = await driveJson(cfg.filmes);
+  const eps = new Map();
+  for (const sh of data.shows || []) for (const e of sh.episodes || []) eps.set(e.id, e);
+  flixCat = {data, eps}; flixCatId = cfg.filmes;
+  return flixCat;
+}
+const srtToVtt = t => 'WEBVTT\n\n' + t.replace(/^\uFEFF/, '').replace(/\r/g, '').replace(/(\d\d:\d\d:\d\d),(\d\d\d)/g, '$1.$2');
+async function flixApi(s, path, url, request) {
+  if (!path.startsWith('/balituflix/')) return null;
+  const cat = await flixLive().catch(() => null);
+  if (!cat) return null; // ainda nada na nuvem: usa a cópia das páginas
+  if (path === '/balituflix/api/catalog') {
+    let token = '';
+    try { token = JSON.parse(s.entries['/balituflix/api/catalog']?.x || '{}').token || ''; } catch {}
+    return json({shows: cat.data.shows, token, root: ''});
+  }
+  const m = /^\/balituflix\/(media|api\/tracks|api\/subtitle)\/([a-f0-9]{16})$/.exec(path);
+  if (!m) return null;
+  const e = cat.eps.get(m[2]);
+  if (!e) return json({error: 'Este vídeo ainda não foi enviado para a nuvem.'}, 404);
+  if (m[1] === 'media') return (await driveFile(e.v, request, 'video/mp4')) || offline();
+  if (m[1] === 'api/tracks') return json({audio: [], subtitles: e.s ? [{index: 0, label: 'Português (BR)', language: 'por'}] : []});
+  if (!e.s) return json({}, 404);
+  const r = await driveFile(e.s, new Request(request.url), 'text/plain');
+  if (!r || !r.ok) return json({}, 503);
+  const txt = await r.text();
+  return new Response(e.st === 'vtt' ? txt : srtToVtt(txt), {headers: {'Content-Type': 'text/vtt; charset=utf-8'}});
+}
+
 const COVER_PATH = /^\/(balituflix\/covers\/|balito-leitor\/api\/cover\/)/;
 let coverIndex = null, coverIndexOf = null;
 function coverEntry(s, path) {
@@ -367,6 +476,10 @@ async function handle(request) {
   }
   const video = /^\/__video__\/arquivo\/([A-Za-z0-9_-]{10,})$/.exec(path);
   if (video) return (await driveFile(video[1], request, url.searchParams.get('tipo') || 'video/x-matroska')) || offline();
+  // Jogos: catálogo, capas e ROMs direto do Drive.
+  { const g = await gamesApi(s, path, url, request); if (g) return g; }
+  // BalituFlix: catálogo e vídeos direto do Drive da Ulbra.
+  { const f = await flixApi(s, path, url, request); if (f) return f; }
   if (request.method !== 'GET' && request.method !== 'HEAD') {
     // Progresso do Reader: aceita e devolve o livro (fica salvo no aparelho pelo próprio player).
     const prog = /^\/balito-leitor\/api\/progress\/([a-f0-9-]{36})$/.exec(path);
