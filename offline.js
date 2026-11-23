@@ -113,11 +113,36 @@
   }
   function entrarDeNovo() { location.href = '/entrar?volta=' + encodeURIComponent(location.pathname + location.search); }
   function sessao() {
+    try { if (document.fullscreenElement) document.exitFullscreen(); } catch (e) {}
     modal('Sua sessão na nuvem expirou', 'Toque para continuar de onde parou.', 'Continuar', function () {
-      renovar(true, function () { location.reload(); });
+      renovar(true, function () { if (!retomarMidia()) location.reload(); });
       setTimeout(function () { if (renovando || Number(localStorage.getItem('bal-nuvem-exp') || 0) < Date.now()) location.href = '/entrar?volta=' + encodeURIComponent(location.pathname + location.search); }, 15000);
     });
   }
+  // Filme ou audiolivro que parou porque o acesso venceu: volta do mesmo ponto, sem recarregar.
+  function retomarMidia() {
+    var feito = false;
+    document.querySelectorAll('video,audio').forEach(function (m) {
+      if (!m.error || !m.currentSrc) return;
+      var t = m.currentTime, src = m.currentSrc;
+      m.addEventListener('loadedmetadata', function () { try { m.currentTime = t; } catch (e) {} m.play().catch(function () {}); }, {once: true});
+      m.src = src; feito = true;
+    });
+    return feito;
+  }
+  // Filme longo: avisa antes do acesso de 1 hora vencer (um toque renova sem parar o vídeo).
+  var aviso = null;
+  setInterval(function () {
+    var exp = Number(localStorage.getItem('bal-nuvem-exp') || 0), tocando = false;
+    document.querySelectorAll('video').forEach(function (v) { if (!v.paused && !v.ended) tocando = true; });
+    var mostrar = tocando && exp && exp - Date.now() < 5 * 60000;
+    if (mostrar && !aviso && document.body) {
+      aviso = document.createElement('div'); aviso.className = 'bn-badge';
+      aviso.style.cssText = 'left:50%;transform:translateX(-50%);bottom:auto;top:14px;color:#fff;background:#3a1d6ee6;border-color:#b48cff88;font-size:13px;padding:8px 14px';
+      aviso.textContent = 'Toque na tela para o filme continuar sem parar';
+      document.body.appendChild(aviso);
+    } else if (!mostrar && aviso) { aviso.remove(); aviso = null; }
+  }, 15000);
   function checar(res, method, url) {
     var tipo = res && res.headers && res.headers.get('X-Balitu-Nuvem');
     if (tipo === 'token') return sessao();
