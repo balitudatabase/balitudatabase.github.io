@@ -477,7 +477,7 @@ async function handle(request) {
   const url = new URL(request.url);
   if (url.origin !== location.origin) return fetch(request);
   let path = url.pathname;
-  if (PROPRIOS.has(path)) return fetch(request);
+  if (PROPRIOS.has(path) || path.startsWith('/consoles/')) return fetch(request);
   const s = await loadState();
   const isNav = request.mode === 'navigate';
   if (!s) return isNav ? Response.redirect('/entrar?volta=' + encodeURIComponent(path + url.search), 302) : json({error: 'Entre de novo para continuar.'}, 401, {'X-Balitu-Nuvem': 'entrar'});
