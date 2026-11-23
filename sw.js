@@ -7,7 +7,7 @@ const MSG = 'O servidor não está ativo no momento! :( Volte mais tarde';
 const DRIVE = 'https://www.googleapis.com/drive/v3/files/';
 const STATE_URL = '/__balitu_estado__';
 // Arquivos do próprio site da nuvem (servidos pelo GitHub, nunca pelo service worker).
-const PROPRIOS = new Set(['/sw.js', '/offline.js', '/entrar', '/entrar.html', '/404.html', '/favicon.ico', '/robots.txt']);
+const PROPRIOS = new Set(['/sw.js', '/offline.js', '/entrar', '/entrar.html', '/404.html', '/favicon.ico', '/robots.txt', '/teste-video', '/teste-video.html']);
 let state = null; // {token, tokenExp, user, entries, blobs, books, fb}
 const FB_KEY = 'AIzaSyAOB_pyCITzJGAX_ScV4-QE2tb5YAP_rxo';
 const FS = 'https://firestore.googleapis.com/v1/projects/balitu-database/databases/(default)/documents';
@@ -88,7 +88,7 @@ async function driveFile(id, request, type) {
     }
   }
   const resp = new Response(r.body, {status: r.status, headers: h});
-  if (!range && !/audio/.test(type || '') && r.status === 200) { const copy = resp.clone(); caches.open('balitu-arquivos').then(c => c.put(id, copy)).catch(() => {}); }
+  if (!range && !/audio|video/.test(type || '') && r.status === 200) { const copy = resp.clone(); caches.open('balitu-arquivos').then(c => c.put(id, copy)).catch(() => {}); }
   return resp;
 }
 
@@ -357,6 +357,16 @@ async function handle(request) {
     if (part) return (await driveFile(part.file, request, 'audio/mpeg')) || offline();
     return offline();
   }
+  // Filmes (teste): procura no Drive o que foi liberado para esta conta e toca direto de lá.
+  if (path === '/__video__/lista') {
+    if (!s.token || Date.now() > s.tokenExp) return json({error: 'Sessão expirada'}, 401, {'X-Balitu-Nuvem': 'token'});
+    const nome = (url.searchParams.get('nome') || '').replace(/['\\]/g, '');
+    const q = encodeURIComponent(`name contains '${nome}' and trashed=false and mimeType != 'application/vnd.google-apps.folder'`);
+    const r = await fetch(DRIVE + '?q=' + q + '&fields=files(id,name,size,mimeType,owners(emailAddress))&pageSize=20&supportsAllDrives=true&includeItemsFromAllDrives=true', {headers: {Authorization: 'Bearer ' + s.token}});
+    return new Response(await r.text(), {status: r.status, headers: {'Content-Type': 'application/json'}});
+  }
+  const video = /^\/__video__\/arquivo\/([A-Za-z0-9_-]{10,})$/.exec(path);
+  if (video) return (await driveFile(video[1], request, url.searchParams.get('tipo') || 'video/x-matroska')) || offline();
   if (request.method !== 'GET' && request.method !== 'HEAD') {
     // Progresso do Reader: aceita e devolve o livro (fica salvo no aparelho pelo próprio player).
     const prog = /^\/balito-leitor\/api\/progress\/([a-f0-9-]{36})$/.exec(path);
