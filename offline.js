@@ -200,7 +200,7 @@
     // Leitor: criar audiolivro novo precisa do PC.
     '#productionPanel,#productionToggle,#start,.bl-production,#blProduction{display:none!important}' +
     // Jogo extra que salva fases no PC.
-    'a[href*="balitu-trap"],#balitu-windows-download,.hero-button[href="/fotos.html"]{display:none!important}';
+    'a[href*="balitu-trap"],#balitu-windows-download,#stats,#buscaTudo,.hero-button[href="/fotos.html"]{display:none!important}';
   function pronto(f) { document.body ? f() : addEventListener('DOMContentLoaded', f); }
   pronto(function () {
     document.head.appendChild(css);
