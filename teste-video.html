@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html lang="pt-BR"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Teste de filme na nuvem · Balitu Database</title>
+<style>
+body{margin:0;min-height:100vh;background:#0d0b1a;color:#eee;font:15px/1.5 system-ui,sans-serif;display:flex;justify-content:center}
+main{width:min(960px,100%);padding:20px}
+h1{font-size:20px;margin:6px 0 4px}p{margin:6px 0;color:#b9b3d1}
+video{width:100%;background:#000;border-radius:12px;margin-top:12px;aspect-ratio:16/9}
+#st{padding:10px 14px;border-radius:10px;background:#ffffff10;margin-top:12px;white-space:pre-line}
+.ok{color:#7dffa8}.ruim{color:#ff8a8a}a{color:#c9b8ff}
+</style></head><body><main>
+<h1>Teste: filme direto do Drive da Ulbra</h1>
+<p>Um Sonho de Liberdade · o vídeo vem do Google Drive, sem passar pelo PC.</p>
+<video id="v" controls playsinline preload="metadata"></video>
+<div id="st">Procurando o filme no Drive…</div>
+<p><a href="/">Voltar ao Balitu Database</a></p>
+</main><script src="/offline.js"></script><script>
+const v=document.getElementById('v'),st=document.getElementById('st');
+const linhas=[];const log=(t,c)=>{linhas.push(c?'<span class="'+c+'">'+t+'</span>':t);st.innerHTML=linhas.join('<br>');};
+const srtParaVtt=t=>'WEBVTT\n\n'+t.replace(/\r/g,'').replace(/(\d\d:\d\d:\d\d),(\d\d\d)/g,'$1.$2');
+async function iniciar(){
+  if(!navigator.serviceWorker?.controller){log('Abra o site e entre com sua conta Google primeiro.','ruim');setTimeout(()=>location.href='/entrar?volta=/teste-video',1500);return;}
+  let r;try{r=await fetch('/__video__/lista?nome='+encodeURIComponent('Um Sonho de Liberdade'));}catch(e){log('Sem conexão: '+e.message,'ruim');return;}
+  if(r.status===401){log('Sessão expirada. Entrando de novo…','ruim');setTimeout(()=>location.href='/entrar?volta=/teste-video',1500);return;}
+  const d=await r.json().catch(()=>({}));
+  if(!r.ok){log('O Drive recusou a busca: '+(d.error?.message||r.status),'ruim');return;}
+  const fs=d.files||[],mkv=fs.find(f=>/\.(mkv|mp4|m4v|webm|avi)$/i.test(f.name)),srt=fs.find(f=>/\.srt$/i.test(f.name));
+  if(!mkv){log('O filme ainda não está liberado para a sua conta Google. A liberação acontece sozinha em até 10 minutos; tente de novo depois.','ruim');return;}
+  log('Filme encontrado: '+mkv.name+' ('+(Number(mkv.size)/1073741824).toFixed(2)+' GB)','ok');
+  log('Navegador diz que toca MKV: '+(v.canPlayType('video/x-matroska')||'não sabe')+' · MP4: '+(v.canPlayType('video/mp4')||'não'));
+  v.src='/__video__/arquivo/'+mkv.id;
+  if(srt){try{const t=await (await fetch('/__video__/arquivo/'+srt.id+'?tipo=text/plain')).text();const tr=document.createElement('track');tr.kind='subtitles';tr.label='Português';tr.srclang='pt';tr.default=true;tr.src=URL.createObjectURL(new Blob([srtParaVtt(t)],{type:'text/vtt'}));v.append(tr);log('Legenda carregada.','ok');}catch{log('Legenda não carregou (o filme continua).');}}
+  const t0=performance.now();
+  v.addEventListener('loadedmetadata',()=>log('Começou a carregar em '+((performance.now()-t0)/1000).toFixed(1)+' s · duração '+Math.round(v.duration/60)+' min · imagem '+v.videoWidth+'×'+v.videoHeight+(v.videoWidth?'':' (SEM IMAGEM: o formato do vídeo não é aceito)'),v.videoWidth?'ok':'ruim'),{once:true});
+  v.addEventListener('playing',()=>{log('Tocando. Confira se tem SOM e se dá para pular para o meio do filme.','ok');setTimeout(()=>{if(v.webkitAudioDecodedByteCount===0||(v.mozHasAudio===false))log('Atenção: o navegador não está decodificando o áudio (provável áudio 5.1/AC3).','ruim');},4000);},{once:true});
+  v.addEventListener('error',()=>log('Este navegador não conseguiu tocar o arquivo (erro '+(v.error?.code||'?')+'). O filme precisaria ser convertido antes de subir.','ruim'));
+  v.addEventListener('waiting',()=>{});
+}
+iniciar();
+</script></body></html>
