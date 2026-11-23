@@ -124,7 +124,7 @@ async function fsCall(method, path, body) {
 const docJson = d => { try { return JSON.parse(d?.fields?.json?.stringValue || 'null'); } catch { return null; } };
 async function fsList(col) {
   const out = []; let page = '';
-  do { const j = await fsCall('GET', '/' + col + '?pageSize=300' + (page ? '&pageToken=' + page : '')); for (const d of j?.documents || []) out.push({id: decodeURIComponent(d.name.split('/').pop()), data: docJson(d), at: Number(d.fields?.atualizado?.integerValue || 0)}); page = j?.nextPageToken || ''; } while (page);
+  do { const j = await fsCall('GET', '/' + col + '?pageSize=300&mask.fieldPaths=json&mask.fieldPaths=atualizado' + (page ? '&pageToken=' + page : '')); for (const d of j?.documents || []) out.push({id: decodeURIComponent(d.name.split('/').pop()), data: docJson(d), at: Number(d.fields?.atualizado?.integerValue || 0)}); page = j?.nextPageToken || ''; } while (page);
   return out;
 }
 const fsPut = (path, data) => fsCall('PATCH', path, {fields: {json: {stringValue: JSON.stringify(data)}, atualizado: {integerValue: String(Date.now())}}});
@@ -347,18 +347,51 @@ async function gamesLive() {
   gamesCat = {list, byId: new Map(list.map(g => [g.i, g]))}; gamesCatId = cfg.jogos;
   return gamesCat;
 }
-// Saves dos jogos na nuvem ficam guardados no próprio aparelho.
-async function gameSave(path, url, request) {
-  const c = await caches.open('balitu-jogos-saves'), key = '/__save__/' + encodeURIComponent(url.searchParams.get('id') || '');
-  if (path === '/api/games/state-info') { const h = await c.match(key); return json(h ? {exists: true, updatedAt: Number(h.headers.get('X-At')) || 0} : {exists: false}); }
-  if (request.method === 'POST') { await c.put(key, new Response(await request.arrayBuffer(), {headers: {'Content-Type': 'application/octet-stream', 'X-At': String(Date.now())}})); return json({ok: true}); }
-  const h = await c.match(key);
-  return h ? new Response(await h.arrayBuffer(), {headers: {'Content-Type': 'application/octet-stream'}}) : json({error: 'Sem jogo salvo'}, 404);
+// Jogo salvo: fica na conta (Firestore, em pedaços) e com uma cópia no aparelho para abrir rápido.
+// O PC sincroniza com a pasta game-saves (vale o mais recente).
+const SAVE_CHUNK = 600 * 1024;
+async function saveKey(id) {
+  let p = '';
+  try { const b = atob(id.replace(/-/g, '+').replace(/_/g, '/') + '==='.slice((id.length + 3) % 4)); p = new TextDecoder().decode(Uint8Array.from(b, c => c.charCodeAt(0))); } catch { p = id; }
+  return hex(p.toLowerCase());
+}
+const b64 = u8 => { let s = ''; for (let i = 0; i < u8.length; i += 0x8000) s += String.fromCharCode.apply(null, u8.subarray(i, i + 0x8000)); return btoa(s); };
+const unb64 = t => Uint8Array.from(atob(t), c => c.charCodeAt(0));
+async function gameSave(s, path, url, request) {
+  const id = url.searchParams.get('id') || '';
+  const key = await saveKey(id), doc = progCol(s) + '/jogo~' + key;
+  const c = await caches.open('balitu-jogos-saves'), local = '/__save__/' + key;
+  const meta = async () => { try { return docJson(await fsCall('GET', doc)); } catch { return undefined; } };
+  if (path === '/api/games/state-info') {
+    const m = await meta(), h = await c.match(local), localAt = h ? Number(h.headers.get('X-At')) || 0 : 0;
+    const at = Math.max(m?.updatedAt || 0, localAt);
+    return json(at ? {exists: true, updatedAt: at} : {exists: false});
+  }
+  if (request.method === 'POST') {
+    const data = new Uint8Array(await request.arrayBuffer()), at = Date.now();
+    if (!data.length) return json({error: 'Vazio'}, 400);
+    await c.put(local, new Response(data, {headers: {'Content-Type': 'application/octet-stream', 'X-At': String(at)}}));
+    try {
+      const parts = Math.ceil(data.length / SAVE_CHUNK);
+      for (let i = 0; i < parts; i++) await fsCall('PATCH', doc + '~' + i, {fields: {d: {stringValue: b64(data.subarray(i * SAVE_CHUNK, (i + 1) * SAVE_CHUNK))}}});
+      const g = gamesCat?.byId.get(id);
+      await fsPut(doc, {tipo: 'jogo', id, name: g?.n || '', console: g?.c || '', parts, size: data.length, updatedAt: at});
+    } catch { return json({ok: true, soNoAparelho: true}); }
+    return json({ok: true, updatedAt: at});
+  }
+  // Abrir o jogo salvo: usa a cópia do aparelho se for a mais nova; senão baixa da conta.
+  const m = await meta(), h = await c.match(local), localAt = h ? Number(h.headers.get('X-At')) || 0 : 0;
+  if (h && localAt >= (m?.updatedAt || 0)) return new Response(await h.arrayBuffer(), {headers: {'Content-Type': 'application/octet-stream'}});
+  if (!m?.parts) return json({error: 'Sem jogo salvo'}, 404);
+  const out = new Uint8Array(m.size); let pos = 0;
+  for (let i = 0; i < m.parts; i++) { const d = await fsCall('GET', doc + '~' + i); const u = unb64(d?.fields?.d?.stringValue || ''); out.set(u, pos); pos += u.length; }
+  await c.put(local, new Response(out, {headers: {'Content-Type': 'application/octet-stream', 'X-At': String(m.updatedAt)}}));
+  return new Response(out, {headers: {'Content-Type': 'application/octet-stream'}});
 }
 const gameSort = new Intl.Collator('pt-BR', {numeric: true, sensitivity: 'base'});
 async function gamesApi(s, path, url, request) {
   if (!path.startsWith('/api/games') || path.startsWith('/api/games/trap')) return null;
-  if (path === '/api/games/state' || path === '/api/games/state-info') return gameSave(path, url, request);
+  if (path === '/api/games/state' || path === '/api/games/state-info') return s.fb?.user ? gameSave(s, path, url, request) : json({exists: false});
   const cat = await gamesLive().catch(() => null);
   if (!cat) return null; // catálogo ainda não está na nuvem: usa a cópia das páginas
   const pub = g => ({id: g.i, name: g.n, format: g.f, console: g.c, core: g.k, cover: ''});
