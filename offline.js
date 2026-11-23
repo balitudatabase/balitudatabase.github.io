@@ -166,3 +166,62 @@
     if (Number(localStorage.getItem('bal-nuvem-exp') || 0) < Date.now()) sessao(); else avisar();
   }, true);
 })();
+
+// ---------- Só o que existe na nuvem ----------
+// Com o PC desligado, o site mostra apenas o que pode ser usado daqui: início, audiolivros,
+// jogos, BalituFlix (só os títulos que estão no Drive) e a gestão de usuários. O resto some
+// dos menus e cartões; se alguém abrir uma dessas páginas, vê um aviso e volta ao início.
+(function () {
+  'use strict';
+  var OK = [/^\/$/, /^\/index\.html$/, /^\/inicio/, /^\/jogos\.html$/, /^\/balito-leitor\//, /^\/balituflix\//, /^\/admin\.html$/,
+    /^\/entrar/, /^\/api\/logout$/, /^\/teste-video/];
+  function permitido(href) {
+    if (!href || /^(#|javascript:|mailto:|tel:)/i.test(href)) return true;
+    var u; try { u = new URL(href, location.href); } catch (e) { return true; }
+    if (u.origin !== location.origin) return true;
+    for (var i = 0; i < OK.length; i++) if (OK[i].test(u.pathname)) return true;
+    return false;
+  }
+  function esconder(raiz) {
+    var links = (raiz || document).querySelectorAll ? (raiz || document).querySelectorAll('a[href]') : [];
+    for (var i = 0; i < links.length; i++) {
+      var a = links[i];
+      if (a.dataset.nuvemVisto) continue;
+      a.dataset.nuvemVisto = '1';
+      if (permitido(a.getAttribute('href'))) continue;
+      // Esconde o cartão/item inteiro quando o link é o próprio cartão, senão só o link.
+      var alvo = a.closest('li') || a;
+      alvo.style.display = 'none';
+      alvo.setAttribute('aria-hidden', 'true');
+    }
+  }
+  var css = document.createElement('style');
+  css.textContent =
+    // Leitor: criar audiolivro novo precisa do PC.
+    '#productionPanel,#productionToggle,#start,.bl-production,#blProduction{display:none!important}' +
+    // Jogo extra que salva fases no PC.
+    'a[href*="balitu-trap"],#balitu-windows-download,.hero-button[href="/fotos.html"]{display:none!important}';
+  function pronto(f) { document.body ? f() : addEventListener('DOMContentLoaded', f); }
+  pronto(function () {
+    document.head.appendChild(css);
+    if (!permitido(location.pathname)) {
+      var d = document.createElement('div');
+      d.style.cssText = 'position:fixed;inset:0;z-index:99999;display:flex;align-items:center;justify-content:center;background:#0d0b1aee;color:#fff;font:16px system-ui,sans-serif;text-align:center;padding:24px';
+      var box = document.createElement('div');
+      var t = document.createElement('p'); t.style.cssText = 'font-size:20px;font-weight:600;margin:0 0 8px';
+      t.textContent = 'Esta parte só funciona com o PC ligado.';
+      var p = document.createElement('p'); p.style.cssText = 'margin:0 0 18px;opacity:.85';
+      p.textContent = 'Agora dá para usar os audiolivros, os jogos e os filmes que estão na nuvem.';
+      var b = document.createElement('a'); b.href = '/'; b.textContent = 'Voltar ao início';
+      b.style.cssText = 'display:inline-block;background:#7b5cff;color:#fff;padding:10px 18px;border-radius:999px;text-decoration:none;font-weight:600';
+      box.append(t, p, b); d.appendChild(box); document.body.appendChild(d);
+    }
+    esconder(document);
+    new MutationObserver(function (ms) {
+      for (var i = 0; i < ms.length; i++) for (var j = 0; j < ms[i].addedNodes.length; j++) {
+        var n = ms[i].addedNodes[j];
+        if (n.nodeType === 1) { if (n.matches && n.matches('a[href]')) { n.parentNode && esconder(n.parentNode); } else esconder(n); }
+      }
+    }).observe(document.body, {childList: true, subtree: true});
+  });
+})();
