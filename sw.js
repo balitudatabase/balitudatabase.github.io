@@ -148,7 +148,7 @@ async function liveItem(s, b, prog = {}) {
   for (const p of b.parts) { if (p.status === 'ready' && p.file) ready++; else break; }
   const preparing = ready < n;
   const item = {nextPart: preparing ? {part: ready + 1, state: 'calculating'} : null, id: b.id, title: b.title, author: b.author, synopsis: b.synopsis || '', series: b.series || '',
-    coverUrl: BASE + '/balito-leitor/api/cover/' + b.id, ambient: b.ambient === true, cinematic: b.cinematic === true, created: b.created, provisional: b.provisional === true, reviewCount: b.reviewCount || 0, reviewNotice: b.reviewNotice || '',
+    coverUrl: BASE + '/balito-leitor/api/cover/' + b.id, ambient: b.ambient === true, cinematic: b.cinematic === true, premium: b.premium === true, created: b.created, provisional: b.provisional === true, reviewCount: b.reviewCount || 0, reviewNotice: b.reviewNotice || '',
     shared: true, status: 'ready', readyPercent: Math.round(100 * ready / n), preparing,
     message: preparing ? ready + ' de ' + n + ' partes disponíveis · em produção' : 'Audiolivro completo · biblioteca de todos',
     position: prog.position,
@@ -260,6 +260,23 @@ async function readerLive(s, path, url, request) {
     }
   } catch (e) { return null; }
   return null;
+}
+
+// ---------- Status ao vivo (bonequinhos e progresso na nuvem via Firestore) ----------
+let liveStatus = null, liveStatusAt = 0;
+async function statusLive(s, path, url, request) {
+  if (path !== '/api/status' || request.method !== 'GET') return null;
+  if (!s.fb?.user) return null;
+  if (s.fb.role !== 'master') return json({error: 'Somente o administrador pode abrir o status.'}, 403);
+  try {
+    if (!liveStatus || Date.now() - liveStatusAt > 15000) {
+      const doc = docJson(await fsCall('GET', '/audiolivros/_status'));
+      if (doc) { liveStatus = doc; liveStatusAt = Date.now(); }
+    }
+    if (!liveStatus) return null;
+    if (url.searchParams.get('graficos') === '1') return json(liveStatus.graficos || {tarefas: []});
+    return liveStatus.status ? json({...liveStatus.status, nuvem: true, statusNuvemAt: liveStatus.updatedAt}) : null;
+  } catch { return null; }
 }
 
 // ---------- Painel de gestão (usuários e permissões) ao vivo ----------
@@ -488,7 +505,8 @@ async function handle(request) {
   if (path === '/api/database-activity') return new Response(null, {status: 204});
   if (path === '/balito-leitor/api/drama/jobs' && request.method === 'GET') return json({items: []});
   if (path === '/balito-leitor/api/voices' && request.method === 'GET' && !s.entries[path]) return json({voices: []});
-  // Painel de gestão ao vivo (Firebase).
+  // Painel de gestão e Status ao vivo (Firebase).
+  { const live = await statusLive(s, path, url, request); if (live) return live; }
   { const live = await adminLive(s, path, request); if (live) return live; }
   // Reader ao vivo: biblioteca, capas, progresso e áudio vêm do Firebase + Drive.
   if (path.startsWith('/balito-leitor/api/')) { const live = await readerLive(s, path, url, request); if (live) return live; }
