@@ -178,7 +178,7 @@
   var OK = [
     /^\/$/, /^\/index\.html$/, /^\/inicio/, /^\/entrar/, /^\/api\/logout$/, /^\/teste-video/,
     /^\/balito-leitor\//, /^\/balituflix\//, /^\/jogos\.html$/, /^\/balitu-trap\.html$/,
-    /^\/admin\.html$/, /^\/status\.html$/,
+    /^\/admin\.html$/, /^\/status\.html$/, /^\/pc(\/|$)/,
     /^\/fotos\.html$/, /^\/pessoas\.html$/, /^\/novidades\.html$/,
     /^\/drive\.html$/, /^\/musicas\.html$/,
     /^\/backups\.html$/, /^\/backups-celulares\.html$/,
