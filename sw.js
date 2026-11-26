@@ -6,6 +6,9 @@ const BASE = ''; // o site da nuvem fica na raiz de balitudatabase.github.io (me
 const MSG = 'O servidor não está ativo no momento! :( Volte mais tarde';
 const DRIVE = 'https://www.googleapis.com/drive/v3/files/';
 const STATE_URL = '/__balitu_estado__';
+const PC_CONTROL_EMAIL = 'alaorfrangullysjunior@gmail.com';
+const MANIFEST_MIN_CREATED = 1795723200000;
+let manifestCheckAt = 0, manifestRefreshing = null;
 // Arquivos do próprio site da nuvem (servidos pelo GitHub, nunca pelo service worker).
 const PROPRIOS = new Set(['/sw.js', '/offline.js', '/entrar', '/entrar.html', '/404.html', '/favicon.ico', '/robots.txt', '/teste-video', '/teste-video.html']);
 let state = null; // {token, tokenExp, user, entries, blobs, books, fb}
@@ -28,6 +31,53 @@ async function loadState() {
   const r = await (await caches.open('balitu-nuvem')).match(STATE_URL);
   state = r ? await r.json() : null;
   return state;
+}
+async function refreshManifest(s) {
+  if (!s?.token || Date.now() > s.tokenExp) return false;
+  if (manifestRefreshing) return manifestRefreshing;
+  manifestCheckAt = Date.now();
+  manifestRefreshing = (async () => {
+    try {
+      const h = {Authorization: 'Bearer ' + s.token};
+      const qList = async q => {
+        const r = await fetch(DRIVE + '?q=' + encodeURIComponent(q + ' and trashed=false') + '&fields=files(id,parents,modifiedTime)&orderBy=modifiedTime desc&pageSize=10&supportsAllDrives=true&includeItemsFromAllDrives=true', {headers: h});
+        return r.ok ? ((await r.json()).files || []) : [];
+      };
+      let pasta = s.pasta || '';
+      const email = String(s.fb?.email || s.email || '').trim().toLowerCase();
+      if (!pasta && email) {
+        for (const f of await qList("name='balitu-espelho-conta.json'")) {
+          const r = await fetch(DRIVE + f.id + '?alt=media&supportsAllDrives=true', {headers: h});
+          if (!r.ok) continue;
+          const c = await r.json().catch(() => null);
+          if (c?.emails?.includes(email)) { pasta = f.parents?.[0] || ''; break; }
+        }
+      }
+      if (!pasta) return false;
+      const mf = (await qList("name='balitu-espelho-manifesto.json' and '" + pasta + "' in parents"))[0];
+      if (!mf) return false;
+      const modMs = Date.parse(mf.modifiedTime || '') || 0;
+      if (s.created && modMs && modMs <= Number(s.created) + 5000 && Number(s.created) >= MANIFEST_MIN_CREATED) return false;
+      const bf = (await qList("name='balitu-espelho-blobs.json' and '" + pasta + "' in parents"))[0];
+      const [mr, br] = await Promise.all([
+        fetch(DRIVE + mf.id + '?alt=media&supportsAllDrives=true', {headers: h}),
+        bf ? fetch(DRIVE + bf.id + '?alt=media&supportsAllDrives=true', {headers: h}) : Promise.resolve(null),
+      ]);
+      if (!mr.ok) return false;
+      const man = await mr.json();
+      const blobs = br && br.ok ? await br.json().catch(() => null) : null;
+      if (man?.entries) {
+        s.entries = man.entries;
+        if (blobs) s.blobs = blobs;
+        s.pasta = pasta;
+        s.created = Math.max(Number(man.created || 0), modMs || Date.now());
+        await saveState();
+        return true;
+      }
+    } catch {}
+    return false;
+  })().finally(() => { manifestRefreshing = null; });
+  return manifestRefreshing;
 }
 
 // ---------- Reescrita: endereços "/x" do site passam a ficar dentro de /googlefotos/nuvem/app ----------
@@ -98,7 +148,7 @@ function readerBook(s, id) {
   if (lib?.x) { try { const it = JSON.parse(lib.x).items.find(b => b.id === id); if (it) return it; } catch {} }
   const b = s.books?.find(x => x.id === id);
   if (!b) return null;
-  return {id: b.id, title: b.title, author: b.author, synopsis: b.synopsis || '', series: b.series || '', coverUrl: '/balito-leitor/api/cover/' + b.id, shared: true, status: 'ready', readyPercent: Math.round(100 * b.parts.length / b.totalParts), preparing: b.parts.length < b.totalParts, message: 'Audiolivro · modo nuvem', parts: b.parts.map(p => ({index: p.index, status: 'ready', duration: p.duration, played: []}))};
+  return {id: b.id, title: b.title, author: b.author, synopsis: b.synopsis || '', series: b.series || '', coverUrl: '/balito-leitor/api/cover/' + b.id, ambient: b.ambient === true, cinematic: b.cinematic === true, premium: b.premium === true, shared: true, status: 'ready', readyPercent: Math.round(100 * b.parts.length / b.totalParts), preparing: b.parts.length < b.totalParts, message: 'Audiolivro · modo nuvem', parts: b.parts.map(p => ({index: p.index, status: 'ready', duration: p.duration, played: []}))};
 }
 
 // ---------- Dados ao vivo (Firebase Firestore) ----------
@@ -382,7 +432,13 @@ load();setInterval(load,6000);
 async function pcControlCloud(s, path, request) {
   if (path !== '/pc' && !path.startsWith('/pc/')) return null;
   if (!s.fb?.user) return null;
-  if (s.fb.role !== 'master') return json({error: 'Somente o administrador pode usar o PC Control.'}, 403);
+  const email = String(s.fb?.email || s.email || '').trim().toLowerCase();
+  if (email !== PC_CONTROL_EMAIL) {
+    if (request.method === 'GET' && (path === '/pc' || path === '/pc/')) {
+      return new Response(`<!doctype html><html lang="pt-BR"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Acesso restrito</title><style>body{margin:0;min-height:100vh;display:grid;place-items:center;background:#0c1125;color:#fff;font:16px system-ui,sans-serif;text-align:center;padding:20px}.b{max-width:420px;background:#ffffff10;border:1px solid #ffffff22;border-radius:20px;padding:28px 22px}a{display:inline-block;margin-top:14px;background:#3b82f6;color:#fff;text-decoration:none;padding:10px 20px;border-radius:999px;font-weight:700}</style><div class="b"><h2>PC Control restrito</h2><p>Acesso permitido apenas para <b>${PC_CONTROL_EMAIL}</b>.</p><a href="/">Voltar ao início</a></div></html>`, {status: 403, headers: {'Content-Type': 'text/html; charset=utf-8'}});
+    }
+    return json({error: `Acesso ao PC Control permitido apenas para ${PC_CONTROL_EMAIL}.`}, 403);
+  }
   if (request.method === 'GET' && (path === '/pc' || path === '/pc/')) {
     return new Response(PC_CLOUD_HTML, {status: 200, headers: {'Content-Type': 'text/html; charset=utf-8'}});
   }
@@ -401,7 +457,7 @@ async function pcControlCloud(s, path, request) {
       const shell = body.shell === 'powershell' ? 'powershell' : 'cmd';
       if (!preset && !command) return json({error: 'Informe um comando ou atalho.'}, 400);
       const id = crypto.randomUUID();
-      await fsPut(baseDoc + '/pc-cmd', {id, preset: preset || null, shell, command: command || null, at: Date.now()});
+      await fsPut(baseDoc + '/pc-cmd', {id, byEmail: email, preset: preset || null, shell, command: command || null, at: Date.now()});
       return json({ok: true, id});
     } catch (e) { return json({error: 'Falha ao enviar comando para a nuvem.'}, 503); }
   }
@@ -706,6 +762,11 @@ async function handle(request) {
   const s = await loadState();
   const isNav = request.mode === 'navigate';
   if (!s) return isNav ? Response.redirect('/entrar?volta=' + encodeURIComponent(path + url.search), 302) : json({error: 'Entre de novo para continuar.'}, 401, {'X-Balitu-Nuvem': 'entrar'});
+  // Atualiza o espelho (ex.: novo reader.js com Premium) automaticamente quando houver versão mais nova no Drive.
+  if (isNav) {
+    if (Number(s.created || 0) < MANIFEST_MIN_CREATED) await refreshManifest(s);
+    else if (Date.now() - manifestCheckAt > 10 * 60000) refreshManifest(s);
+  }
 
   // Endereços que o site monta como "/api" + "/x" ficam com o prefixo da nuvem repetido no meio.
   if (BASE && path.includes(BASE)) path = path.split(BASE).join('');
