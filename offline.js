@@ -173,7 +173,7 @@
 // dos menus e cartões; se alguém abrir uma dessas páginas, vê um aviso e volta ao início.
 (function () {
   'use strict';
-  var OK = [/^\/$/, /^\/index\.html$/, /^\/inicio/, /^\/jogos\.html$/, /^\/balito-leitor\//, /^\/balituflix\//, /^\/admin\.html$/,
+  var OK = [/^\/$/, /^\/index\.html$/, /^\/inicio/, /^\/jogos\.html$/, /^\/balito-leitor\//, /^\/balituflix\//, /^\/admin\.html$/, /^\/status\.html$/,
     /^\/entrar/, /^\/api\/logout$/, /^\/teste-video/];
   function permitido(href) {
     if (!href || /^(#|javascript:|mailto:|tel:)/i.test(href)) return true;
