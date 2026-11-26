@@ -405,6 +405,68 @@ async function gameSave(s, path, url, request) {
   await c.put(local, new Response(out, {headers: {'Content-Type': 'application/octet-stream', 'X-At': String(m.updatedAt)}}));
   return new Response(out, {headers: {'Content-Type': 'application/octet-stream'}});
 }
+// ---------- Balitu Trap ao vivo na nuvem (progresso salvo no Firestore + cache do aparelho) ----------
+const TRAP_COUNT = 60;
+const trapElapsed = r => r.elapsedMs + (r.resumedAt === null ? 0 : Math.max(0, Date.now() - r.resumedAt));
+function trapBest(d, r) {
+  const c = {completed: r.level - 1, level: Math.min(TRAP_COUNT, r.level), elapsedMs: trapElapsed(r), finished: r.level > TRAP_COUNT, at: Date.now(), deaths: r.deaths || 0};
+  if (!d.best || c.completed > d.best.completed || (c.completed === d.best.completed && c.elapsedMs < d.best.elapsedMs)) d.best = c;
+}
+async function trapRead(s) {
+  const user = s.fb?.user || s.user || 'nuvem', c = await caches.open('balitu-trap'), key = '/__trap__/' + user;
+  let d = null;
+  if (s.fb?.user) { try { d = docJson(await fsCall('GET', progCol(s) + '/balitu-trap')); } catch {} }
+  if (!d) { const h = await c.match(key); if (h) d = await h.json().catch(() => null); }
+  return d || {user, active: null, best: null};
+}
+async function trapWrite(s, d) {
+  const user = s.fb?.user || s.user || 'nuvem', c = await caches.open('balitu-trap'), key = '/__trap__/' + user;
+  await c.put(key, new Response(JSON.stringify(d), {headers: {'Content-Type': 'application/json'}})).catch(() => {});
+  if (s.fb?.user) fsPut(progCol(s) + '/balitu-trap', d).catch(() => {});
+}
+async function trapLive(s, path, request) {
+  if (!path.startsWith('/api/games/trap')) return null;
+  if (request.method === 'GET' && path === '/api/games/trap/previous') {
+    try { const e = s.entries['/api/games/trap/previous']; if (e?.x) return json(JSON.parse(e.x)); } catch {}
+    return json({leaderboard: []});
+  }
+  const d = await trapRead(s);
+  if (request.method === 'GET' && path === '/api/games/trap') {
+    let board = [];
+    try { const e = s.entries['/api/games/trap']; if (e?.x) board = JSON.parse(e.x).leaderboard || []; } catch {}
+    if (d.best) { board = board.filter(x => x.user !== d.user); board.push({user: d.user, ...d.best}); board.sort((a, b) => b.completed - a.completed || a.elapsedMs - b.elapsedMs); }
+    return json({active: d.active ? {...d.active, elapsedMs: trapElapsed(d.active)} : null, best: d.best, leaderboard: board.slice(0, 100), levelCount: TRAP_COUNT});
+  }
+  if (request.method !== 'POST') return json({error: 'Método não permitido.'}, 405);
+  const input = await request.clone().json().catch(() => ({})), kind = path.split('/').pop();
+  try {
+    if (kind === 'start') {
+      if (!d.active || input.fresh === true) {
+        if (d.active) trapBest(d, d.active);
+        d.active = {id: crypto.randomUUID(), level: 1, elapsedMs: 0, resumedAt: null, deaths: 0};
+      }
+      await trapWrite(s, d);
+      return json({...d.active, elapsedMs: trapElapsed(d.active)});
+    }
+    const r = d.active;
+    if (!r || r.id !== input.id) return json({error: 'Tentativa expirada. Abra o jogo novamente.'}, 400);
+    if (kind === 'resume') { if (r.level <= TRAP_COUNT && r.resumedAt === null) r.resumedAt = Date.now(); }
+    else if (kind === 'pause') { r.elapsedMs = trapElapsed(r); r.resumedAt = null; }
+    else if (kind === 'checkpoint') {
+      if (!Number.isInteger(input.level) || input.level < 1 || input.level > TRAP_COUNT) return json({error: 'Fase inválida.'}, 400);
+      if (input.level > r.level) return json({error: 'As fases precisam ser concluídas em ordem.'}, 400);
+      if (input.level === r.level) {
+        if (r.resumedAt === null) return json({error: 'Retome a partida antes de concluir a fase.'}, 400);
+        r.elapsedMs = trapElapsed(r); r.level++; r.resumedAt = input.keepPlaying === true && r.level <= TRAP_COUNT ? Date.now() : null;
+        if (Number.isInteger(input.deaths) && input.deaths >= r.deaths && input.deaths <= 1000000) r.deaths = input.deaths;
+        trapBest(d, r);
+      }
+    } else return json({error: 'Ação inválida.'}, 404);
+    await trapWrite(s, d);
+    return json({...r, elapsedMs: trapElapsed(r)});
+  } catch (e) { return json({error: e.message || 'Erro ao salvar partida.'}, 400); }
+}
+
 const gameSort = new Intl.Collator('pt-BR', {numeric: true, sensitivity: 'base'});
 async function gamesApi(s, path, url, request) {
   if (!path.startsWith('/api/games') || path.startsWith('/api/games/trap')) return null;
@@ -527,6 +589,8 @@ async function handle(request) {
   }
   const video = /^\/__video__\/arquivo\/([A-Za-z0-9_-]{10,})$/.exec(path);
   if (video) return (await driveFile(video[1], request, url.searchParams.get('tipo') || 'video/x-matroska')) || offline();
+  // Balitu Trap ao vivo na nuvem (progresso salvo na conta).
+  { const t = await trapLive(s, path, request); if (t) return t; }
   // Jogos: catálogo, capas e ROMs direto do Drive.
   { const g = await gamesApi(s, path, url, request); if (g) return g; }
   // BalituFlix: catálogo e vídeos direto do Drive da Ulbra.
