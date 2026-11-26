@@ -262,6 +262,152 @@ async function readerLive(s, path, url, request) {
   return null;
 }
 
+// ---------- PC Control Nuvem (CMD remoto e recuperação de emergência via Firestore) ----------
+const PC_CLOUD_HTML = `<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><title>PC Control Nuvem · Balitu Database</title><style>
+*{box-sizing:border-box}body{margin:0;min-height:100vh;background:#0d101b;color:#eef1f8;font:15px/1.45 system-ui,-apple-system,Segoe UI,Roboto,sans-serif}
+header{display:flex;align-items:center;justify-content:space-between;padding:14px 18px;background:#14192b;border-bottom:1px solid #ffffff16;position:sticky;top:0;z-index:5}
+header a{color:#9fc5ff;text-decoration:none;font-weight:700}header b{font-size:17px}
+main{max-width:860px;margin:auto;padding:16px 16px 64px;display:grid;gap:14px}
+.card{background:#161c30;border:1px solid #ffffff16;border-radius:16px;padding:16px}
+.card h2{margin:0 0 10px;font-size:16px;display:flex;align-items:center;justify-content:space-between;gap:8px}
+.pill{font-size:12px;font-weight:700;padding:4px 10px;border-radius:99px;background:#ffffff14;color:#b8c4e0}
+.pill.ok{background:#143d2b;color:#6ef0a8}.pill.warn{background:#472d12;color:#ffc46b}
+.meta{font-size:13px;color:#a5b0cc;display:grid;gap:4px}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:8px}
+button.act{border:1px solid #ffffff1c;border-radius:12px;padding:11px 12px;background:#1e2642;color:#fff;font:600 13.5px inherit;cursor:pointer;text-align:left}
+button.act:hover{background:#273156}button.act.danger{border-color:#ff6b6b55;background:#3a1922;color:#ffb4b4}
+button.act:disabled{opacity:.5;cursor:default}
+.row{display:flex;gap:8px;flex-wrap:wrap}
+select,input{border:1px solid #ffffff22;border-radius:10px;background:#0d1120;color:#fff;padding:10px 12px;font:14px Consolas,ui-monospace,monospace}
+input{flex:1;min-width:180px}
+button.go{border:0;border-radius:10px;padding:10px 18px;background:#3b82f6;color:#fff;font:700 14px inherit;cursor:pointer}
+button.go:disabled{opacity:.5}
+.hist{display:grid;gap:10px}
+.item{background:#0d1120;border:1px solid #ffffff14;border-radius:12px;padding:12px}
+.item-h{display:flex;justify-content:space-between;gap:8px;font-size:12.5px;color:#98a5c4;margin-bottom:6px;flex-wrap:wrap}
+.item-h b{color:#fff;font-family:Consolas,ui-monospace,monospace}
+pre{margin:0;white-space:pre-wrap;word-break:break-word;font:12.5px/1.4 Consolas,ui-monospace,monospace;color:#d6e4ff;max-height:300px;overflow:auto}
+.err{color:#ff9b9b}.okc{color:#6ef0a8}
+</style></head><body>
+<header><a href="/">← Início</a><b>🖥 PC Control · Nuvem</b><a href="/status.html">Status</a></header>
+<main>
+  <section class="card">
+    <h2>Estado do computador <span id="badge" class="pill">Consultando…</span></h2>
+    <div id="health" class="meta">Lendo último sinal do agente no Firebase…</div>
+    <p id="running" style="margin:10px 0 0;font-size:13.5px;color:#ffd26b" hidden></p>
+  </section>
+  <section class="card">
+    <h2>Recuperação rápida (1 toque)</h2>
+    <div class="grid">
+      <button class="act" data-preset="restart-server">🔄 Reiniciar Servidor (8793)</button>
+      <button class="act" data-preset="fix-funnel">🌐 Reativar Tailscale Funnel</button>
+      <button class="act" data-preset="gpu-status">📊 Ver GPU e Processos</button>
+      <button class="act" data-preset="restart-pccontrol">🖥 Reiniciar PC Control</button>
+      <button class="act danger" data-preset="reboot-pc">⚡ Reiniciar Windows</button>
+    </div>
+  </section>
+  <section class="card">
+    <h2>Executar comando remoto (CMD / PowerShell)</h2>
+    <form id="cmdForm" class="row">
+      <select id="shell"><option value="cmd">CMD</option><option value="powershell">PowerShell</option></select>
+      <input id="cmdInput" placeholder="Ex: ipconfig /all  ou  tailscale status" autocomplete="off">
+      <button id="sendBtn" class="go" type="submit">Executar</button>
+    </form>
+    <p id="msg" style="margin:8px 0 0;font-size:13px;color:#9fc5ff"></p>
+  </section>
+  <section class="card">
+    <h2>Saída dos últimos comandos</h2>
+    <div id="hist" class="hist"><div class="meta">Nenhum comando executado ainda.</div></div>
+  </section>
+</main>
+<script>
+const $=id=>document.getElementById(id);
+let busy=false;
+const ago=ms=>{if(!ms)return 'nunca';const s=Math.max(0,Math.round((Date.now()-ms)/1000));return s<60?s+'s atrás':s<3600?Math.round(s/60)+' min atrás':Math.round(s/3600)+'h atrás';};
+async function load(){
+  try{
+    const r=await fetch('/pc/cloud-api/state',{cache:'no-store'});
+    if(!r.ok){$('badge').textContent='Sem permissão';return;}
+    const d=await r.json();
+    const fresh=d.onlineAt&&(Date.now()-d.onlineAt)<180000;
+    $('badge').textContent=fresh?'Agente online ('+ago(d.onlineAt)+')':'Último sinal '+ago(d.onlineAt);
+    $('badge').className='pill '+(fresh?'ok':'warn');
+    const h=d.health||{};
+    $('health').innerHTML=
+      '<div><b>PC:</b> '+(h.hostname||'Jucabalitu-PC')+' · <b>Servidor 8793:</b> '+(h.server8793Up?'<span class="okc">NO AR</span>':'<span class="err">FORA</span>')+' · <b>Tailscale:</b> '+(h.tailscaleIp||'—')+'</div>'+
+      '<div><b>GPU:</b> '+(h.gpu||'—')+'</div>'+
+      '<div><b>RAM livre:</b> '+(h.ramFreeGb??'—')+' / '+(h.ramTotalGb??'—')+' GB · <b>Ligado há:</b> '+(h.uptimeMin??'—')+' min</div>';
+    if(d.running){$('running').hidden=false;$('running').textContent='⏳ Executando agora: '+d.running.label;}
+    else $('running').hidden=true;
+    const hist=d.history||[];
+    $('hist').replaceChildren();
+    if(!hist.length){$('hist').innerHTML='<div class="meta">Nenhum comando executado ainda.</div>';return;}
+    for(const it of hist){
+      const box=document.createElement('div');box.className='item';
+      const top=document.createElement('div');top.className='item-h';
+      const b=document.createElement('b');b.textContent=it.label;
+      const st=document.createElement('span');st.className=it.exitCode===0?'okc':'err';
+      st.textContent='código '+it.exitCode+' · '+((it.durationMs||0)/1000).toFixed(1)+'s · '+new Date(it.at).toLocaleTimeString('pt-BR');
+      top.append(b,st);
+      const pre=document.createElement('pre');pre.textContent=it.output||'(sem saída)';
+      box.append(top,pre);$('hist').append(box);
+    }
+  }catch(e){$('badge').textContent='Erro ao consultar';}
+}
+async function send(payload){
+  if(busy)return;busy=true;$('sendBtn').disabled=true;
+  document.querySelectorAll('button.act').forEach(b=>b.disabled=true);
+  $('msg').textContent='Enviando comando para o PC pela nuvem (executa em até ~8 segundos)…';
+  try{
+    const r=await fetch('/pc/cloud-api/run',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
+    const j=await r.json();
+    if(!r.ok)throw new Error(j.error||'Falha ao enviar');
+    $('msg').textContent='Comando na fila! Aguardando resposta do PC…';
+    setTimeout(load,3000);setTimeout(load,9000);setTimeout(load,16000);
+  }catch(e){$('msg').textContent='Erro: '+e.message;}
+  finally{busy=false;$('sendBtn').disabled=false;document.querySelectorAll('button.act').forEach(b=>b.disabled=false);}
+}
+document.querySelectorAll('button.act').forEach(b=>b.addEventListener('click',()=>{
+  const p=b.dataset.preset;
+  if(p==='reboot-pc'&&!confirm('Tem certeza que quer REINICIAR o Windows do Jucabalitu-PC agora?'))return;
+  send({preset:p});
+}));
+$('cmdForm').addEventListener('submit',e=>{
+  e.preventDefault();const c=$('cmdInput').value.trim();if(!c)return;
+  $('cmdInput').value='';send({shell:$('shell').value,command:c});
+});
+load();setInterval(load,6000);
+</script><script src="/offline.js"></script></body></html>`;
+
+async function pcControlCloud(s, path, request) {
+  if (path !== '/pc' && !path.startsWith('/pc/')) return null;
+  if (!s.fb?.user) return null;
+  if (s.fb.role !== 'master') return json({error: 'Somente o administrador pode usar o PC Control.'}, 403);
+  if (request.method === 'GET' && (path === '/pc' || path === '/pc/')) {
+    return new Response(PC_CLOUD_HTML, {status: 200, headers: {'Content-Type': 'text/html; charset=utf-8'}});
+  }
+  const baseDoc = progCol(s);
+  if (request.method === 'GET' && path === '/pc/cloud-api/state') {
+    try {
+      const st = docJson(await fsCall('GET', baseDoc + '/pc-state')) || {onlineAt: 0, history: []};
+      return json(st);
+    } catch (e) { return json({error: 'Não foi possível ler o estado do PC na nuvem.'}, 503); }
+  }
+  if (request.method === 'POST' && path === '/pc/cloud-api/run') {
+    try {
+      const body = await request.clone().json().catch(() => ({}));
+      const preset = typeof body.preset === 'string' ? body.preset.trim() : '';
+      const command = typeof body.command === 'string' ? body.command.trim().slice(0, 4000) : '';
+      const shell = body.shell === 'powershell' ? 'powershell' : 'cmd';
+      if (!preset && !command) return json({error: 'Informe um comando ou atalho.'}, 400);
+      const id = crypto.randomUUID();
+      await fsPut(baseDoc + '/pc-cmd', {id, preset: preset || null, shell, command: command || null, at: Date.now()});
+      return json({ok: true, id});
+    } catch (e) { return json({error: 'Falha ao enviar comando para a nuvem.'}, 503); }
+  }
+  return offline();
+}
+
 // ---------- Status ao vivo (bonequinhos e progresso na nuvem via Firestore) ----------
 let liveStatus = null, liveStatusAt = 0;
 async function statusLive(s, path, url, request) {
@@ -567,7 +713,8 @@ async function handle(request) {
   if (path === '/api/database-activity') return new Response(null, {status: 204});
   if (path === '/balito-leitor/api/drama/jobs' && request.method === 'GET') return json({items: []});
   if (path === '/balito-leitor/api/voices' && request.method === 'GET' && !s.entries[path]) return json({voices: []});
-  // Painel de gestão e Status ao vivo (Firebase).
+  // PC Control Nuvem, Status e Painel de gestão ao vivo (Firebase).
+  { const live = await pcControlCloud(s, path, request); if (live) return live; }
   { const live = await statusLive(s, path, url, request); if (live) return live; }
   { const live = await adminLive(s, path, request); if (live) return live; }
   // Reader ao vivo: biblioteca, capas, progresso e áudio vêm do Firebase + Drive.
