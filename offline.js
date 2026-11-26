@@ -175,19 +175,24 @@
 // criação de novos audiolivros, instalador APK/Windows e mídia pesada que só existe no HD).
 (function () {
   'use strict';
+  var PC_EMAIL = 'alaorfrangullysjunior@gmail.com';
   var OK = [
     /^\/$/, /^\/index\.html$/, /^\/inicio/, /^\/entrar/, /^\/api\/logout$/, /^\/teste-video/,
     /^\/balito-leitor\//, /^\/balituflix\//, /^\/jogos\.html$/, /^\/balitu-trap\.html$/,
-    /^\/admin\.html$/, /^\/status\.html$/, /^\/pc(\/|$)/,
+    /^\/admin\.html$/, /^\/status\.html$/,
     /^\/fotos\.html$/, /^\/pessoas\.html$/, /^\/novidades\.html$/,
     /^\/drive\.html$/, /^\/musicas\.html$/,
     /^\/backups\.html$/, /^\/backups-celulares\.html$/,
     /^\/organizacao\.html$/, /^\/conferir-duplicidades\.html$/, /^\/paginas\.html$/
   ];
+  function podePcControl() {
+    try { return String(localStorage.getItem('bal-nuvem-email') || '').trim().toLowerCase() === PC_EMAIL; } catch (e) { return false; }
+  }
   function permitido(href) {
     if (!href || /^(#|javascript:|mailto:|tel:)/i.test(href)) return true;
     var u; try { u = new URL(href, location.href); } catch (e) { return true; }
     if (u.origin !== location.origin) return true;
+    if (/^\/pc(\/|$)/.test(u.pathname)) return podePcControl();
     for (var i = 0; i < OK.length; i++) if (OK[i].test(u.pathname)) return true;
     return false;
   }
