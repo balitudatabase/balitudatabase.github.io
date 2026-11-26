@@ -94,7 +94,7 @@ async function entrar(){
   if(!man){msg('Não encontrei a cópia da sua conta. Tente mais tarde.');btn.disabled=false;return}
   const reg=await navigator.serviceWorker.register('/sw.js',{scope:'/'});
   const sw=(await navigator.serviceWorker.ready).active;
-  await new Promise(ok=>{navigator.serviceWorker.addEventListener('message',e=>e.data?.type==='ok'&&ok(),{once:true});sw.postMessage({type:'estado',state:{token:tok,tokenExp,fb,user:conta.user,entries:man.entries,blobs:blobs||{},books:cat?.books||[],created:man.created}})});
+  await new Promise(ok=>{navigator.serviceWorker.addEventListener('message',e=>e.data?.type==='ok'&&ok(),{once:true});sw.postMessage({type:'estado',state:{token:tok,tokenExp,fb,email,pasta,user:conta.user,entries:man.entries,blobs:blobs||{},books:cat?.books||[],created:man.created}})});
   location.replace(BASE+volta);
  }catch(e){msg(e.message||'Não foi possível entrar.');btn.disabled=false;btn.innerHTML=btnHtml}
 }
