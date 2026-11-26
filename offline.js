@@ -167,14 +167,23 @@
   }, true);
 })();
 
-// ---------- Só o que existe na nuvem ----------
-// Com o PC desligado, o site mostra apenas o que pode ser usado daqui: início, audiolivros,
-// jogos, BalituFlix (só os títulos que estão no Drive) e a gestão de usuários. O resto some
-// dos menus e cartões; se alguém abrir uma dessas páginas, vê um aviso e volta ao início.
+// ---------- Tudo o que é leve funciona na nuvem ----------
+// Com o PC desligado, todas as páginas leves do Balitu Database ficam disponíveis
+// (início, Reader, BalituFlix, Jogos, Balitu Trap, Status, Gestão, Galeria/miniaturas,
+// Pessoas, Drive/listagens, Músicas/listas, Backups, Novidades, Organização e Duplicidades).
+// Só ficam ocultos recursos que dependem 100% do PC ligado (PC Control, Downloads yt-dlp,
+// criação de novos audiolivros, instalador APK/Windows e mídia pesada que só existe no HD).
 (function () {
   'use strict';
-  var OK = [/^\/$/, /^\/index\.html$/, /^\/inicio/, /^\/jogos\.html$/, /^\/balito-leitor\//, /^\/balituflix\//, /^\/admin\.html$/, /^\/status\.html$/,
-    /^\/entrar/, /^\/api\/logout$/, /^\/teste-video/];
+  var OK = [
+    /^\/$/, /^\/index\.html$/, /^\/inicio/, /^\/entrar/, /^\/api\/logout$/, /^\/teste-video/,
+    /^\/balito-leitor\//, /^\/balituflix\//, /^\/jogos\.html$/, /^\/balitu-trap\.html$/,
+    /^\/admin\.html$/, /^\/status\.html$/,
+    /^\/fotos\.html$/, /^\/pessoas\.html$/, /^\/novidades\.html$/,
+    /^\/drive\.html$/, /^\/musicas\.html$/,
+    /^\/backups\.html$/, /^\/backups-celulares\.html$/,
+    /^\/organizacao\.html$/, /^\/conferir-duplicidades\.html$/, /^\/paginas\.html$/
+  ];
   function permitido(href) {
     if (!href || /^(#|javascript:|mailto:|tel:)/i.test(href)) return true;
     var u; try { u = new URL(href, location.href); } catch (e) { return true; }
@@ -197,10 +206,10 @@
   }
   var css = document.createElement('style');
   css.textContent =
-    // Leitor: criar audiolivro novo precisa do PC.
+    // Leitor: criar audiolivro novo precisa do PC (GPU).
     '#productionPanel,#productionToggle,#start,.bl-production,#blProduction{display:none!important}' +
-    // Jogo extra que salva fases no PC.
-    'a[href*="balitu-trap"],#balitu-windows-download,#stats,#buscaTudo,.hero-button[href="/fotos.html"]{display:none!important}';
+    // Instalador pesado do Windows e busca global no HD.
+    '#balitu-windows-download,#buscaTudo{display:none!important}';
   function pronto(f) { document.body ? f() : addEventListener('DOMContentLoaded', f); }
   pronto(function () {
     document.head.appendChild(css);
