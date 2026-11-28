@@ -103,13 +103,8 @@
     ready(function () { document.body.appendChild(back); });
   }
   function avisar() {
-    if (Date.now() - lastShown < 4000) return; lastShown = Date.now();
-    document.querySelectorAll('video,audio').forEach(function (m) { try { m.pause(); } catch (e) {} });
-    // Antes de dizer que o servidor está fora, confere: se ele responde, abre o site completo.
-    pcOnline().then(function (b) {
-      if (b) return irParaPc(b);
-      modal(MSG, 'Tocar, baixar e abrir arquivos precisa do PC ligado. O resto do Balitu Database continua aqui.', 'Entendi');
-    });
+    // Não exibir avisos gerais para falhas de recursos em segundo plano.
+    // A resposta de erro continua disponível para o recurso que a solicitou.
   }
   function entrarDeNovo() { location.href = '/entrar?volta=' + encodeURIComponent(location.pathname + location.search); }
   function sessao() {
