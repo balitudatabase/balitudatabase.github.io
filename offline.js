@@ -3,7 +3,7 @@
 (function () {
   'use strict';
   var BASE = '';
-  var MSG = 'O servidor não está ativo no momento! :( Volte mais tarde';
+  var MSG = 'Conteúdo indisponível no modo nuvem';
   var CLIENT_ID = '330955968953-hkm76a032m98apcoidf3jc00m7qm15r7.apps.googleusercontent.com';
   var lastClick = 0, lastShown = 0;
   var fetch0 = window.fetch;
