@@ -3,7 +3,7 @@
 // guardada no Google Drive (privado) e toca os audiolivros direto do Drive.
 'use strict';
 const BASE = ''; // o site da nuvem fica na raiz de balitudatabase.github.io (mesmos caminhos do site do PC)
-const MSG = 'O servidor não está ativo no momento! :( Volte mais tarde';
+const MSG = 'Conteúdo indisponível no modo nuvem';
 const DRIVE = 'https://www.googleapis.com/drive/v3/files/';
 const STATE_URL = '/__balitu_estado__';
 const PC_CONTROL_EMAIL = 'alaorfrangullysjunior@gmail.com';
